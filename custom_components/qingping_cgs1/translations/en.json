@@ -31,7 +31,7 @@
                 "description": "Select Qingping Model",
                 "data": {
                     "model": "Select your device",
-                    "ble_devices": "CGDN1 BLE devices (JSON list or comma-separated MACs)",
+                    "ble_devices": "CGDN1 BLE devices for type 11/26 replies (JSON list or comma-separated MACs)",
                     "temporary_report_interval": "Temporary report interval",
                     "temporary_report_duration": "Temporary report duration",
                     "temporary_report_refresh": "Temporary report refresh interval",

@@ -34,7 +34,7 @@ from .tlv_encoder import tlv_encode, int_to_bytes_little_endian
 
 from .adv_decoder import decode_qingping_adv_data
 from .private_mqtt import QingpingPrivateGatewayHandler
-from .qingping_private import up_topic
+from .qingping_private import maybe_normalize_mac, up_topic_variants
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -463,6 +463,7 @@ async def async_setup_entry(
     if model == "CGDN1":
         private_handler = QingpingPrivateGatewayHandler(hass, config_entry)
         hass.data[DOMAIN][config_entry.entry_id]["private_handler"] = private_handler
+        _LOGGER.info("Created CGDN1 private MQTT handler for %s", mac)
         hass.async_create_task(private_handler.async_start())
 
     if model in TLV_MODELS:
@@ -527,6 +528,7 @@ async def async_setup_entry(
     @callback
     def message_received(message):
         """Handle new MQTT messages."""
+        nonlocal private_handler
         try:
             # Check if TLV binary format
             if is_tlv_format(message.payload):
@@ -540,10 +542,35 @@ async def async_setup_entry(
                 _LOGGER.error("Payload is not a dictionary")
                 return
 
-            if private_handler is not None:
-                hass.async_create_task(private_handler.async_handle_message(payload))
-
             message_type = str(payload.get("type", ""))
+            topic_parts = message.topic.split("/")
+            topic_mac = maybe_normalize_mac(topic_parts[1]) if len(topic_parts) >= 3 else None
+            expected_topic_mac = maybe_normalize_mac(mac)
+            topic_matches_entry = topic_mac == expected_topic_mac
+
+            if (
+                private_handler is None
+                and message_type in {"10", "25"}
+                and topic_matches_entry
+                and model not in ADV_MODELS
+            ):
+                _LOGGER.warning(
+                    "Device %s is configured as %s but sent CGDN1 gateway request type %s; enabling private MQTT handler for this runtime only. Set the model to CGDN1 in options if this device is a gateway",
+                    mac,
+                    model,
+                    message_type,
+                )
+                private_handler = QingpingPrivateGatewayHandler(hass, config_entry)
+                hass.data[DOMAIN][config_entry.entry_id]["private_handler"] = private_handler
+                hass.async_create_task(private_handler.async_start(initialize=False))
+
+            if private_handler is not None:
+                if not topic_matches_entry:
+                    return
+                hass.async_create_task(private_handler.async_handle_message(payload, message.topic))
+                if message_type in {"10", "13", "14", "25"}:
+                    return
+
             received_mac = payload.get("mac", "").replace(":", "").upper()
             expected_mac = mac.replace(":", "").upper()
 
@@ -787,14 +814,14 @@ async def async_setup_entry(
         except Exception as e:
             _LOGGER.error("Error processing TLV message: %s", str(e))
 
-    topic = f"{MQTT_TOPIC_PREFIX}/#" if model == "CGDK2" else up_topic(mac)
+    topics = [f"{MQTT_TOPIC_PREFIX}/#"] if model == "CGDK2" else up_topic_variants(mac)
+    for topic in topics:
+        await mqtt.async_subscribe(
+            hass, topic, message_received, 1, encoding=None
+        )
+        _LOGGER.info("Subscribed to MQTT topic: %s", topic)
 
-    await mqtt.async_subscribe(
-        hass, topic, message_received, 1, encoding=None
-    )
-    _LOGGER.info("Subscribed to MQTT topic: %s", topic)
-
-    if model not in ADV_MODELS:
+    if model not in ADV_MODELS and model != "CGDN1":
         # Set up timer for periodic publishing
         async def publish_config_wrapper(*args):
             if await ensure_mqtt_connected(hass):
@@ -895,7 +922,7 @@ class QingpingDeviceStatusSensor(CoordinatorEntity, SensorEntity):
         if not self.hass:
             return
         model = self._config_entry.data.get(CONF_MODEL, "CGS1")
-        if model in ADV_MODELS:
+        if model in ADV_MODELS or model == "CGDN1":
             return
         # Add a small delay to let the device fully come online
         await asyncio.sleep(2)
@@ -1179,7 +1206,7 @@ class QingpingDeviceSensor(CoordinatorEntity, SensorEntity):
             return
         
         model = self._config_entry.data.get(CONF_MODEL, "CGS1")
-        if model in ADV_MODELS:
+        if model in ADV_MODELS or model == "CGDN1":
             return
             
         update_interval = self.coordinator.data.get(CONF_UPDATE_INTERVAL, 15)

@@ -61,6 +61,24 @@ This custom component integrates the Qingping devices with Home Assistant, allow
 `⚠️ Do not include : in your MAC address. example: 532D38701E1F`
 <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
 
+### CGDN1 gateway and CGDK2 BLE devices
+
+CGDN1 works as an MQTT gateway. CGDK2 devices are BLE sensors behind that gateway.
+
+- Add the gateway entry as model `CGDN1`.
+- Add each BLE sensor entry as model `CGDK2`.
+- When the gateway sends `{"type":"10"}`, the integration replies with `{"type":"11","dev_list":[...]}` using the configured CGDK2 entries.
+- If the automatic list is not enough, set the gateway option `CGDN1 BLE devices` to a JSON list or comma-separated MACs, for example:
+
+```json
+[
+  {"mac": "582D34885C15", "name": "CGDK2 5C15"},
+  {"mac": "582D34885C16", "name": "CGDK2 5C16"}
+]
+```
+
+The integration publishes CGDN1 private protocol commands only to the gateway down topic. CGDK2 entries listen for relayed BLE packets and do not publish MQTT configuration commands themselves.
+
 ## How it Works
 <img src="https://github.com/user-attachments/assets/55a42477-59a7-48b6-b70b-f743c5e2a69a" alt="Device Discovery" width="275" align="right">
 

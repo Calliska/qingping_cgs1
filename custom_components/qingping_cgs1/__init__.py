@@ -21,7 +21,7 @@ from .const import (
 from .qingping_private import maybe_normalize_mac
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.NUMBER, Platform.SELECT, Platform.SWITCH, Platform.BUTTON, Platform.TIME]
-PRIVATE_SERVICE_DOMAIN = "qingping_private"
+PRIVATE_SERVICE_DOMAIN = DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -58,22 +58,46 @@ def down_topic(gateway_mac: str) -> str:
     return f"{MQTT_TOPIC_PREFIX}/{normalize_mac(gateway_mac)}/down"
 
 
-def build_type_11_payload(ble_devices: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def topic_mac_variants(gateway_mac: str) -> list[str]:
+    """Return topic MAC variants for case-sensitive MQTT brokers."""
+    raw = str(gateway_mac or "").replace(":", "").replace("-", "")
+    normalized = normalize_mac(gateway_mac)
+    variants = [raw, normalized, normalized.lower()]
+    return list(dict.fromkeys(variant for variant in variants if variant))
+
+
+def up_topic_variants(gateway_mac: str) -> list[str]:
+    """Return possible CGDN1 up topics for existing mixed-case entries."""
+    return [f"{MQTT_TOPIC_PREFIX}/{variant}/up" for variant in topic_mac_variants(gateway_mac)]
+
+
+def down_topic_variants(gateway_mac: str) -> list[str]:
+    """Return possible CGDN1 down topics for existing mixed-case entries."""
+    return [f"{MQTT_TOPIC_PREFIX}/{variant}/down" for variant in topic_mac_variants(gateway_mac)]
+
+
+def build_type_11_payload(ble_devices: Iterable[dict[str, Any]], request_id: Any = None) -> dict[str, Any]:
     """Build BLE device list response."""
-    return {
+    payload = {
         "type": "11",
         "dev_list": [normalize_mac(device["mac"]) for device in ble_devices],
     }
+    if request_id is not None:
+        payload["id"] = request_id
+    return payload
 
 
-def build_type_26_payload(ble_devices: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def build_type_26_payload(ble_devices: Iterable[dict[str, Any]], request_id: Any = None) -> dict[str, Any]:
     """Build BLE device list response with names."""
     homekit_dev_list = []
     for device in ble_devices:
         mac = normalize_mac(device["mac"])
         name = str(device.get("name") or f"CGDK2 {mac[-4:]}")
         homekit_dev_list.append({"mac": mac, "name": name})
-    return {"type": "26", "homekit_dev_list": homekit_dev_list}
+    payload = {"type": "26", "homekit_dev_list": homekit_dev_list}
+    if request_id is not None:
+        payload["id"] = request_id
+    return payload
 
 
 def build_type_12_payload(

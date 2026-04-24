@@ -9,10 +9,13 @@ from custom_components.qingping_cgs1.qingping_private import (
     build_type_18_ack_payload,
     build_type_26_payload,
     down_topic,
+    down_topic_variants,
     normalize_mac,
     parse_json_payload,
     result_description,
+    topic_mac_variants,
     up_topic,
+    up_topic_variants,
 )
 
 
@@ -27,11 +30,24 @@ class QingpingPrivateHelperTests(unittest.TestCase):
     def test_topics(self) -> None:
         self.assertEqual(up_topic("aa:bb:cc:dd:ee:ff"), "qingping/AABBCCDDEEFF/up")
         self.assertEqual(down_topic("aa:bb:cc:dd:ee:ff"), "qingping/AABBCCDDEEFF/down")
+        self.assertEqual(topic_mac_variants("aa:bb:cc:dd:ee:ff"), ["aabbccddeeff", "AABBCCDDEEFF"])
+        self.assertEqual(
+            up_topic_variants("aa:bb:cc:dd:ee:ff"),
+            ["qingping/aabbccddeeff/up", "qingping/AABBCCDDEEFF/up"],
+        )
+        self.assertEqual(
+            down_topic_variants("aa:bb:cc:dd:ee:ff"),
+            ["qingping/aabbccddeeff/down", "qingping/AABBCCDDEEFF/down"],
+        )
 
     def test_type_11_payload(self) -> None:
         self.assertEqual(
             build_type_11_payload([{"mac": "11:22:33:44:55:66"}]),
             {"type": "11", "dev_list": ["112233445566"]},
+        )
+        self.assertEqual(
+            build_type_11_payload([{"mac": "11:22:33:44:55:66"}], request_id=7),
+            {"type": "11", "dev_list": ["112233445566"], "id": 7},
         )
 
     def test_type_26_payload(self) -> None:
@@ -46,6 +62,14 @@ class QingpingPrivateHelperTests(unittest.TestCase):
                     {"mac": "112233445566", "name": "Bedroom"},
                     {"mac": "AABBCCDDEEFF", "name": "CGDK2 EEFF"},
                 ],
+            },
+        )
+        self.assertEqual(
+            build_type_26_payload([{"mac": "112233445566", "name": "Bedroom"}], request_id="abc"),
+            {
+                "type": "26",
+                "homekit_dev_list": [{"mac": "112233445566", "name": "Bedroom"}],
+                "id": "abc",
             },
         )
 
