@@ -1,0 +1,57 @@
+refresh_ble_devices:
+  name: Refresh BLE devices
+  description: Send CGDN1 type 11 and type 26 BLE device list payloads.
+  fields:
+    gateway_mac:
+      name: Gateway MAC
+      description: Optional CGDN1 MAC. If omitted, all active CGDN1 gateways are refreshed.
+      selector:
+        text:
+
+enable_temporary_report:
+  name: Enable temporary report
+  description: Send CGDN1 type 12 temporary report mode.
+  fields:
+    gateway_mac:
+      name: Gateway MAC
+      description: Optional CGDN1 MAC. If omitted, all active CGDN1 gateways are targeted.
+      selector:
+        text:
+    interval:
+      name: Interval
+      description: Report interval in seconds.
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 86400
+          mode: box
+    duration:
+      name: Duration
+      description: Temporary report duration in seconds.
+      default: 86400
+      selector:
+        number:
+          min: 1
+          max: 604800
+          mode: box
+
+enable_diagnostic_report:
+  name: Enable diagnostic report
+  description: Send CGDN1 type 12 diagnostic mode with interval 10 seconds and duration 600 seconds.
+  fields:
+    gateway_mac:
+      name: Gateway MAC
+      description: Optional CGDN1 MAC. If omitted, all active CGDN1 gateways are targeted.
+      selector:
+        text:
+
+configure_gateway_settings:
+  name: Configure gateway settings
+  description: Send CGDN1 type 17 persistent gateway settings from integration options.
+  fields:
+    gateway_mac:
+      name: Gateway MAC
+      description: Optional CGDN1 MAC. If omitted, all active CGDN1 gateways are targeted.
+      selector:
+        text:

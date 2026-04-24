@@ -48,6 +48,27 @@ DEFAULT_UPDATE_INTERVAL = 15
 # MQTT topics
 MQTT_TOPIC_PREFIX = "qingping"
 
+# Qingping private MQTT gateway settings
+CONF_BLE_DEVICES = "ble_devices"
+CONF_TEMPORARY_REPORT = "temporary_report"
+CONF_TEMPORARY_REPORT_INTERVAL = "temporary_report_interval"
+CONF_TEMPORARY_REPORT_DURATION = "temporary_report_duration"
+CONF_TEMPORARY_REPORT_REFRESH = "temporary_report_refresh"
+CONF_CONFIGURE_GATEWAY_SETTINGS = "configure_gateway_settings"
+CONF_CONFIGURE_GATEWAY_ON_START = "configure_gateway_on_start"
+CONF_CONFIGURE_GATEWAY_ON_RECONNECT = "configure_gateway_on_reconnect"
+CONF_GATEWAY_SETTINGS = "gateway_settings"
+CONF_COLLECT_INTERVAL = "collect_interval"
+CONF_CO2_SAMPLING_INTERVAL = "co2_sampling_interval"
+CONF_PM_SAMPLING_INTERVAL = "pm_sampling_interval"
+
+DEFAULT_TEMPORARY_REPORT_INTERVAL = 60
+DEFAULT_TEMPORARY_REPORT_DURATION = 86400
+DEFAULT_TEMPORARY_REPORT_REFRESH = 43200
+DIAGNOSTIC_REPORT_INTERVAL = 10
+DIAGNOSTIC_REPORT_DURATION = 600
+SENSOR_DATA_STALE_SECONDS = 600
+
 # Configuration message
 ATTR_TYPE = "type"
 ATTR_UP_ITVL = "up_itvl"

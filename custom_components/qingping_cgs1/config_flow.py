@@ -15,7 +15,27 @@ from homeassistant.components import mqtt
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import DOMAIN, MQTT_TOPIC_PREFIX, QP_MODELS, DEFAULT_MODEL
+from .const import (
+    CONF_BLE_DEVICES,
+    CONF_CO2_SAMPLING_INTERVAL,
+    CONF_COLLECT_INTERVAL,
+    CONF_CONFIGURE_GATEWAY_ON_RECONNECT,
+    CONF_CONFIGURE_GATEWAY_ON_START,
+    CONF_PM_SAMPLING_INTERVAL,
+    CONF_REPORT_INTERVAL,
+    CONF_TEMPERATURE_UNIT,
+    CONF_TEMPORARY_REPORT_DURATION,
+    CONF_TEMPORARY_REPORT_INTERVAL,
+    CONF_TEMPORARY_REPORT_REFRESH,
+    CONF_TIMEZONE,
+    DEFAULT_MODEL,
+    DEFAULT_TEMPORARY_REPORT_DURATION,
+    DEFAULT_TEMPORARY_REPORT_INTERVAL,
+    DEFAULT_TEMPORARY_REPORT_REFRESH,
+    DOMAIN,
+    MQTT_TOPIC_PREFIX,
+    QP_MODELS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 DISCOVERY_CACHE_TTL = 24 * 60 * 60  # 24 hours
@@ -265,7 +285,19 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # Update the config entry
             new_data = {
                 **self.config_entry.data,
-                CONF_MODEL: user_input[CONF_MODEL]
+                CONF_MODEL: user_input[CONF_MODEL],
+                CONF_BLE_DEVICES: user_input.get(CONF_BLE_DEVICES, ""),
+                CONF_TEMPORARY_REPORT_INTERVAL: user_input.get(CONF_TEMPORARY_REPORT_INTERVAL, DEFAULT_TEMPORARY_REPORT_INTERVAL),
+                CONF_TEMPORARY_REPORT_DURATION: user_input.get(CONF_TEMPORARY_REPORT_DURATION, DEFAULT_TEMPORARY_REPORT_DURATION),
+                CONF_TEMPORARY_REPORT_REFRESH: user_input.get(CONF_TEMPORARY_REPORT_REFRESH, DEFAULT_TEMPORARY_REPORT_REFRESH),
+                CONF_CONFIGURE_GATEWAY_ON_START: user_input.get(CONF_CONFIGURE_GATEWAY_ON_START, False),
+                CONF_CONFIGURE_GATEWAY_ON_RECONNECT: user_input.get(CONF_CONFIGURE_GATEWAY_ON_RECONNECT, False),
+                CONF_REPORT_INTERVAL: user_input.get(CONF_REPORT_INTERVAL, DEFAULT_TEMPORARY_REPORT_INTERVAL),
+                CONF_COLLECT_INTERVAL: user_input.get(CONF_COLLECT_INTERVAL, 10),
+                CONF_CO2_SAMPLING_INTERVAL: user_input.get(CONF_CO2_SAMPLING_INTERVAL, 10),
+                CONF_PM_SAMPLING_INTERVAL: user_input.get(CONF_PM_SAMPLING_INTERVAL, 10),
+                CONF_TEMPERATURE_UNIT: user_input.get(CONF_TEMPERATURE_UNIT, "C"),
+                CONF_TIMEZONE: user_input.get(CONF_TIMEZONE, 20),
             }
             
             self.hass.config_entries.async_update_entry(
@@ -285,6 +317,53 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_MODEL,
                     default=self.config_entry.data.get(CONF_MODEL, DEFAULT_MODEL)
                 ): vol.In(QP_MODELS),
+                vol.Optional(
+                    CONF_BLE_DEVICES,
+                    default=self.config_entry.data.get(CONF_BLE_DEVICES, "")
+                ): str,
+                vol.Optional(
+                    CONF_TEMPORARY_REPORT_INTERVAL,
+                    default=self.config_entry.data.get(CONF_TEMPORARY_REPORT_INTERVAL, DEFAULT_TEMPORARY_REPORT_INTERVAL)
+                ): vol.Coerce(int),
+                vol.Optional(
+                    CONF_TEMPORARY_REPORT_DURATION,
+                    default=self.config_entry.data.get(CONF_TEMPORARY_REPORT_DURATION, DEFAULT_TEMPORARY_REPORT_DURATION)
+                ): vol.Coerce(int),
+                vol.Optional(
+                    CONF_TEMPORARY_REPORT_REFRESH,
+                    default=self.config_entry.data.get(CONF_TEMPORARY_REPORT_REFRESH, DEFAULT_TEMPORARY_REPORT_REFRESH)
+                ): vol.Coerce(int),
+                vol.Optional(
+                    CONF_CONFIGURE_GATEWAY_ON_START,
+                    default=self.config_entry.data.get(CONF_CONFIGURE_GATEWAY_ON_START, False)
+                ): bool,
+                vol.Optional(
+                    CONF_CONFIGURE_GATEWAY_ON_RECONNECT,
+                    default=self.config_entry.data.get(CONF_CONFIGURE_GATEWAY_ON_RECONNECT, False)
+                ): bool,
+                vol.Optional(
+                    CONF_REPORT_INTERVAL,
+                    default=self.config_entry.data.get(CONF_REPORT_INTERVAL, DEFAULT_TEMPORARY_REPORT_INTERVAL)
+                ): vol.Coerce(int),
+                vol.Optional(
+                    CONF_COLLECT_INTERVAL,
+                    default=self.config_entry.data.get(CONF_COLLECT_INTERVAL, 10)
+                ): vol.Coerce(int),
+                vol.Optional(
+                    CONF_CO2_SAMPLING_INTERVAL,
+                    default=self.config_entry.data.get(CONF_CO2_SAMPLING_INTERVAL, 10)
+                ): vol.Coerce(int),
+                vol.Optional(
+                    CONF_PM_SAMPLING_INTERVAL,
+                    default=self.config_entry.data.get(CONF_PM_SAMPLING_INTERVAL, 10)
+                ): vol.Coerce(int),
+                vol.Optional(
+                    CONF_TEMPERATURE_UNIT,
+                    default=self.config_entry.data.get(CONF_TEMPERATURE_UNIT, "C")
+                ): vol.In(["C", "F"]),
+                vol.Optional(
+                    CONF_TIMEZONE,
+                    default=self.config_entry.data.get(CONF_TIMEZONE, 20)
+                ): vol.Coerce(int),
             }),
         )
-		

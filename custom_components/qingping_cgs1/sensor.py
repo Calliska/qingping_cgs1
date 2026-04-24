@@ -33,6 +33,8 @@ from .tlv_decoder import tlv_decode, is_tlv_format
 from .tlv_encoder import tlv_encode, int_to_bytes_little_endian
 
 from .adv_decoder import decode_qingping_adv_data
+from .private_mqtt import QingpingPrivateGatewayHandler
+from .qingping_private import up_topic
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -457,8 +459,70 @@ async def async_setup_entry(
     hass.data[DOMAIN].setdefault(config_entry.entry_id, {})
     hass.data[DOMAIN][config_entry.entry_id]["sensors"] = sensors
 
+    private_handler = None
+    if model == "CGDN1":
+        private_handler = QingpingPrivateGatewayHandler(hass, config_entry)
+        hass.data[DOMAIN][config_entry.entry_id]["private_handler"] = private_handler
+        hass.async_create_task(private_handler.async_start())
+
     if model in TLV_MODELS:
         await _send_initial_tlv_config(hass, config_entry, mac, model)
+
+    def _update_sensors_from_json_sensor_data(sensor_data_list):
+        """Update HA entities from JSON sensorData entries."""
+        known_sensor_types = {
+            SENSOR_BATTERY,
+            SENSOR_CO2,
+            SENSOR_HUMIDITY,
+            SENSOR_PM10,
+            SENSOR_PM25,
+            SENSOR_TEMPERATURE,
+            SENSOR_TVOC,
+            SENSOR_ETVOC,
+            SENSOR_NOISE,
+            SENSOR_PRESSURE,
+            SENSOR_LIGHT,
+            SENSOR_SIGNAL_STRENGTH,
+        }
+
+        for data in sensor_data_list:
+            if not isinstance(data, dict):
+                continue
+
+            unknown_fields = set(data) - known_sensor_types - {"timestamp"}
+            if unknown_fields:
+                _LOGGER.debug("Unknown Qingping sensorData fields for %s: %s", mac, sorted(unknown_fields))
+
+            battery_charging = None
+            battery_status = None
+            if SENSOR_BATTERY in data:
+                battery_data = data[SENSOR_BATTERY]
+                if isinstance(battery_data, dict):
+                    battery_status = battery_data.get("status")
+                    if battery_status is not None:
+                        battery_charging = battery_status == 1
+
+            if battery_status is not None and battery_state and battery_state.hass:
+                battery_state.update_battery_state(battery_status)
+
+            for sensor in sensors:
+                if not sensor.hass or not hasattr(sensor, "_sensor_type"):
+                    continue
+                if sensor._sensor_type not in data:
+                    continue
+                item = data[sensor._sensor_type]
+                if isinstance(item, dict):
+                    value = item.get("value")
+                    if sensor._sensor_type in [SENSOR_PM10, SENSOR_PM25] and value == 99999:
+                        sensor.set_unavailable()
+                        continue
+                else:
+                    value = item
+                if value is None:
+                    continue
+                sensor.update_from_latest_data(value)
+                if sensor._sensor_type == SENSOR_BATTERY and battery_charging is not None:
+                    sensor.update_battery_charging(battery_charging)
 
     @callback
     def message_received(message):
@@ -475,17 +539,30 @@ async def async_setup_entry(
             if not isinstance(payload, dict):
                 _LOGGER.error("Payload is not a dictionary")
                 return
-            
+
+            if private_handler is not None:
+                hass.async_create_task(private_handler.async_handle_message(payload))
+
             message_type = str(payload.get("type", ""))
             received_mac = payload.get("mac", "").replace(":", "").upper()
             expected_mac = mac.replace(":", "").upper()
 
             # NEW: gateway-relayed BLE packet
             if model in ADV_MODELS:
-                if message_type != "9":
+                if not received_mac or received_mac != expected_mac:
                     return
 
-                if not received_mac or received_mac != expected_mac:
+                sensor_data = payload.get("sensorData")
+                if message_type in {"12", "17"} and isinstance(sensor_data, list) and sensor_data:
+                    current_timestamp = int(time.time())
+                    if status_sensor.hass:
+                        status_sensor.update_timestamp(current_timestamp)
+                    if mac_sensor.hass:
+                        mac_sensor.update_mac(expected_mac)
+                    _update_sensors_from_json_sensor_data(sensor_data)
+                    return
+
+                if message_type != "9":
                     return
 
                 adv_data = payload.get("adv_data")
@@ -578,49 +655,10 @@ async def async_setup_entry(
                 _LOGGER.debug("No valid sensorData in payload, possibly a config response or device just powered on")
                 # Device is online, just waiting for sensor data
                 return
-            #if len(sensor_data) == 1:
-            if message_type not in [17, 13, "17", "13"]:
-                #ignore type 17 sensor data                
-                for data in sensor_data:
-                    battery_charging = None
-                    battery_status = None
-                    if SENSOR_BATTERY in data:
-                        battery_data = data[SENSOR_BATTERY]
-                        if isinstance(battery_data, dict):
-                            battery_status = battery_data.get("status")
-                            if battery_status is not None:
-                                battery_charging = (battery_status == 1)  # Explicitly True or False
-                    
-                    # Update battery state sensor first if we have status
-                    if battery_status is not None and battery_state.hass:
-                        battery_state.update_battery_state(battery_status)
-                    
-                    for sensor in sensors[5:]:  # Skip status, firmware, mac, type, and battery_state sensors
-                        if not sensor.hass:
-                            continue
-                        if not hasattr(sensor, "_sensor_type"):
-                            continue
-                        if sensor._sensor_type in data:
-                            sensor_data = data[sensor._sensor_type]
-                            if isinstance(sensor_data, dict):
-                                value = sensor_data.get("value")
-                                status = sensor_data.get("status")
-                                # Check if PM sensor is disabled (value=99999)
-                                if sensor._sensor_type in [SENSOR_PM10, SENSOR_PM25] and value == 99999:
-                                    sensor.set_unavailable()
-                                elif value is not None:
-                                    sensor.update_from_latest_data(value)
-                                    if sensor._sensor_type == SENSOR_BATTERY and battery_charging is not None:
-                                        sensor.update_battery_charging(battery_charging)
-                            else:
-                                # Handle non-dict values (backward compatibility)
-                                value = sensor_data
-                                if value is not None:
-                                    sensor.update_from_latest_data(value)
-                                    if sensor._sensor_type == SENSOR_BATTERY and battery_charging is not None:
-                                        sensor.update_battery_charging(battery_charging)
+            if message_type not in [13, "13"]:
+                _update_sensors_from_json_sensor_data(sensor_data)
             else:
-                _LOGGER.info("sensorData is type 17")
+                _LOGGER.debug("Ignoring heartbeat sensorData for %s", mac)
                 return
 
         except json.JSONDecodeError:
@@ -749,7 +787,7 @@ async def async_setup_entry(
         except Exception as e:
             _LOGGER.error("Error processing TLV message: %s", str(e))
 
-    topic = f"{MQTT_TOPIC_PREFIX}/#" if model == "CGDK2" else f"{MQTT_TOPIC_PREFIX}/{mac}/up"
+    topic = f"{MQTT_TOPIC_PREFIX}/#" if model == "CGDK2" else up_topic(mac)
 
     await mqtt.async_subscribe(
         hass, topic, message_received, 1, encoding=None

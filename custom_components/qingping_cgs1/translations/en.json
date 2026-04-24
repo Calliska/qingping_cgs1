@@ -30,7 +30,19 @@
             "init": {
                 "description": "Select Qingping Model",
                 "data": {
-                    "model": "Select your device"
+                    "model": "Select your device",
+                    "ble_devices": "CGDN1 BLE devices (JSON list or comma-separated MACs)",
+                    "temporary_report_interval": "Temporary report interval",
+                    "temporary_report_duration": "Temporary report duration",
+                    "temporary_report_refresh": "Temporary report refresh interval",
+                    "configure_gateway_on_start": "Configure gateway settings on start",
+                    "configure_gateway_on_reconnect": "Configure gateway settings after reconnect",
+                    "report_interval": "Gateway report interval",
+                    "collect_interval": "Gateway collect interval",
+                    "co2_sampling_interval": "CO2 sampling interval",
+                    "pm_sampling_interval": "PM sampling interval",
+                    "temperature_unit": "Temperature unit",
+                    "timezone": "Qingping timezone value"
                 }
             }
         }
