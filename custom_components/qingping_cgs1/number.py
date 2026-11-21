@@ -21,6 +21,8 @@ from .const import (
     TLV_MODELS, JSON_MODELS, ADV_MODELS
 )
 from .tlv_encoder import tlv_encode, int_to_bytes_little_endian
+from .const import CONF_TEMPORARY_REPORT_DURATION, CONF_TEMPORARY_REPORT_INTERVAL, DEFAULT_TEMPORARY_REPORT_DURATION, DEFAULT_TEMPORARY_REPORT_INTERVAL
+from .topology import entry_settings
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -584,7 +586,11 @@ class QingpingDeviceUpdateIntervalNumber(CoordinatorEntity, NumberEntity):
         self._attr_device_info = device_info
         self._attr_native_min_value = 5
         self._attr_native_max_value = 300
-        self._attr_native_step = 10
+        self._attr_native_step = 1 if config_entry.data.get(CONF_MODEL) == "CGDN1" else 10
+        if config_entry.data.get(CONF_MODEL) == "CGDN1":
+            self._attr_native_min_value = 1
+            self._attr_native_max_value = 86400
+            self._attr_name = f"{name} Temporary MQTT Report Interval"
         self._attr_native_unit_of_measurement = "s"
         self._attr_mode = NumberMode.BOX
         self._attr_entity_category = EntityCategory.CONFIG
@@ -592,11 +598,31 @@ class QingpingDeviceUpdateIntervalNumber(CoordinatorEntity, NumberEntity):
     @property
     def native_value(self) -> int:
         """Return the current value."""
+        if self._config_entry.data.get(CONF_MODEL) == "CGDN1":
+            return int(entry_settings(self._config_entry).get(
+                CONF_TEMPORARY_REPORT_INTERVAL, DEFAULT_TEMPORARY_REPORT_INTERVAL
+            ))
         return self.coordinator.data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
 
     async def async_set_native_value(self, value: float) -> None:
         """Update the value."""
         int_value = int(value)
+        runtime = self.hass.data[DOMAIN][self._config_entry.entry_id]
+        if self._config_entry.data.get(CONF_MODEL) == "CGDN1":
+            from homeassistant.exceptions import HomeAssistantError
+
+            duration = int(entry_settings(self._config_entry).get(
+                CONF_TEMPORARY_REPORT_DURATION, DEFAULT_TEMPORARY_REPORT_DURATION
+            ))
+            if int_value >= duration:
+                raise HomeAssistantError("The temporary report duration must exceed the report interval")
+            new_data = {**self._config_entry.data, CONF_TEMPORARY_REPORT_INTERVAL: int_value}
+            self.hass.config_entries.async_update_entry(self._config_entry, data=new_data)
+            self.async_write_ha_state()
+            handler = runtime.get("private_handler")
+            if handler is None or not await handler.async_enable_temporary_report():
+                raise HomeAssistantError("The interval was saved. MQTT could not send it to the Qingping gateway.")
+            return
         self.coordinator.data[CONF_UPDATE_INTERVAL] = int_value
         self.async_write_ha_state()
 
@@ -766,6 +792,7 @@ class QingpingDeviceTimezoneNumber(CoordinatorEntity, NumberEntity):
         # Update config entry
         new_data = dict(self._config_entry.data)
         new_data[CONF_TIMEZONE] = value
+        new_data["timezone_wire"] = int(value * 10)
         self.hass.config_entries.async_update_entry(self._config_entry, data=new_data)
         
         await self.coordinator.async_request_refresh()

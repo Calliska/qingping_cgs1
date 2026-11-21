@@ -1,34 +1,43 @@
-"""Config flow for Qingping CGxx integration."""
+"""Native setup, discovery and configuration for Qingping devices."""
+
 from __future__ import annotations
 
-import voluptuous as vol
-import logging
-from typing import Any
 import asyncio
-import json
 import time
+from datetime import datetime
+from typing import Any
 
+import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.const import CONF_MAC, CONF_NAME, CONF_MODEL
-from homeassistant.data_entry_flow import FlowResult
 from homeassistant.components import mqtt
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.util import dt as dt_util
 
 from .const import (
+    ADV_MODELS,
+    BLE_CANDIDATE_TTL,
+    CONF_AUTO_ADD_BLE,
     CONF_BLE_DEVICES,
+    CONF_BLE_TIMEOUT,
     CONF_CO2_SAMPLING_INTERVAL,
     CONF_COLLECT_INTERVAL,
     CONF_CONFIGURE_GATEWAY_ON_RECONNECT,
     CONF_CONFIGURE_GATEWAY_ON_START,
+    CONF_GATEWAY_DOWN_TOPIC,
+    CONF_GATEWAY_MAC,
+    CONF_GATEWAY_UP_TOPIC,
+    CONF_MAC,
+    CONF_MODEL,
+    CONF_NAME,
     CONF_PM_SAMPLING_INTERVAL,
     CONF_REPORT_INTERVAL,
     CONF_TEMPERATURE_UNIT,
+    CONF_TEMPORARY_REPORT,
     CONF_TEMPORARY_REPORT_DURATION,
     CONF_TEMPORARY_REPORT_INTERVAL,
     CONF_TEMPORARY_REPORT_REFRESH,
-    CONF_TIMEZONE,
-    DEFAULT_MODEL,
+    DEFAULT_BLE_TIMEOUT,
     DEFAULT_TEMPORARY_REPORT_DURATION,
     DEFAULT_TEMPORARY_REPORT_INTERVAL,
     DEFAULT_TEMPORARY_REPORT_REFRESH,
@@ -36,334 +45,357 @@ from .const import (
     MQTT_TOPIC_PREFIX,
     QP_MODELS,
 )
+from .qingping_private import down_topic_variants, maybe_normalize_mac, mqtt_topic_is_valid, parse_json_payload, up_topic_variants
+from .reports import decode_ble_report
+from .topology import BLE_CANDIDATES, entry_settings, gateway_entries, parse_ble_devices, remember_candidate, resolve_gateway
 
-_LOGGER = logging.getLogger(__name__)
-DISCOVERY_CACHE_TTL = 24 * 60 * 60  # 24 hours
+_DISCOVERED = "discovered_mac"
+_MANUAL = ""
+_NO_GATEWAY = ""
+_GATEWAY_DEFAULTS = {
+    CONF_GATEWAY_UP_TOPIC: "",
+    CONF_GATEWAY_DOWN_TOPIC: "",
+    CONF_AUTO_ADD_BLE: False,
+    CONF_TEMPORARY_REPORT: True,
+    CONF_TEMPORARY_REPORT_INTERVAL: DEFAULT_TEMPORARY_REPORT_INTERVAL,
+    CONF_TEMPORARY_REPORT_DURATION: DEFAULT_TEMPORARY_REPORT_DURATION,
+    CONF_TEMPORARY_REPORT_REFRESH: DEFAULT_TEMPORARY_REPORT_REFRESH,
+    CONF_CONFIGURE_GATEWAY_ON_START: False,
+    CONF_CONFIGURE_GATEWAY_ON_RECONNECT: False,
+    CONF_REPORT_INTERVAL: 60,
+    CONF_COLLECT_INTERVAL: 10,
+    CONF_CO2_SAMPLING_INTERVAL: 10,
+    CONF_PM_SAMPLING_INTERVAL: 10,
+    CONF_TEMPERATURE_UNIT: "C",
+}
 
-def clean_mac_address(mac: str) -> str:
-    """Remove colons from MAC address if present."""
-    return mac.replace(":", "")
+
+def _validate_topics(values: dict[str, Any]) -> bool:
+    up = values.get(CONF_GATEWAY_UP_TOPIC, "")
+    down = values.get(CONF_GATEWAY_DOWN_TOPIC, "")
+    return (
+        (not up or mqtt_topic_is_valid(up))
+        and (not down or mqtt_topic_is_valid(down))
+        and (not up or up != down)
+        and (not up or up.endswith("/up") or bool(down))
+    )
+
+
+def _settings_schema(settings: dict[str, Any]) -> dict[Any, Any]:
+    validators = {
+        CONF_GATEWAY_UP_TOPIC: str,
+        CONF_GATEWAY_DOWN_TOPIC: str,
+        CONF_AUTO_ADD_BLE: bool,
+        CONF_TEMPORARY_REPORT: bool,
+        CONF_TEMPORARY_REPORT_INTERVAL: vol.All(vol.Coerce(int), vol.Range(min=1, max=86400)),
+        CONF_TEMPORARY_REPORT_DURATION: vol.All(vol.Coerce(int), vol.Range(min=30, max=604800)),
+        CONF_TEMPORARY_REPORT_REFRESH: vol.All(vol.Coerce(int), vol.Range(min=1, max=604800)),
+        CONF_CONFIGURE_GATEWAY_ON_START: bool,
+        CONF_CONFIGURE_GATEWAY_ON_RECONNECT: bool,
+        CONF_REPORT_INTERVAL: vol.All(vol.Coerce(int), vol.Range(min=1, max=86400)),
+        CONF_COLLECT_INTERVAL: vol.All(vol.Coerce(int), vol.Range(min=1, max=86400)),
+        CONF_CO2_SAMPLING_INTERVAL: vol.All(vol.Coerce(int), vol.Range(min=1, max=86400)),
+        CONF_PM_SAMPLING_INTERVAL: vol.All(vol.Coerce(int), vol.Range(min=1, max=86400)),
+        CONF_TEMPERATURE_UNIT: vol.In(["C", "F"]),
+    }
+    return {
+        vol.Optional(key, default=settings.get(key, default)): validators[key]
+        for key, default in _GATEWAY_DEFAULTS.items()
+    }
+
+
+def _gateway_choices(hass) -> dict[str, str]:
+    return {mac: f"{entry.title} ({mac})" for mac, entry in gateway_entries(hass).items()}
+
+
+def _topics_in_use(hass, mac, settings):
+    def topics(address, values):
+        up = values.get(CONF_GATEWAY_UP_TOPIC)
+        down = values.get(CONF_GATEWAY_DOWN_TOPIC)
+        if not down and up and up.endswith("/up"):
+            down = f"{up[:-3]}/down"
+        return set([up] if up else up_topic_variants(address)) | set([down] if down else down_topic_variants(address))
+
+    requested = topics(mac, settings)
+    return any(
+        other != mac and bool(requested & topics(other, entry_settings(entry)))
+        for other, entry in gateway_entries(hass).items()
+    )
+
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Qingping CGxx."""
+    """Add gateways and sensors manually or from verified MQTT traffic."""
 
-    VERSION = 1
+    VERSION = 2
 
-    def __init__(self):
-        """Initialize the config flow."""
-        self._discovered_devices = {}
+    def __init__(self) -> None:
+        self._gateway_discovery: dict[str, str] | None = None
+        self._other_discovery: dict[str, str] = {}
+        self._discovery: dict[str, Any] = {}
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle the initial step."""
-        errors = {}
+    async def async_step_user(self, user_input=None):
+        return self.async_show_menu(step_id="user", menu_options=["gateway", "ble", "other"])
 
-        try:
-            if user_input is None:
-                # Discover available devices
-                await self._async_discover_devices()
+    async def _async_scan_gateways(self) -> dict[str, str]:
+        discovered = {}
 
-                # Check if there are any available devices
-                if not self._discovered_devices:
-                    return self.async_show_form(
-                        step_id="no_devices",
-                        errors=errors,
-                    )
-
-                # Create the schema with the dropdown
-                data_schema = vol.Schema({
-                    vol.Required(CONF_MAC): vol.In(self._discovered_devices),
-                    vol.Required(CONF_NAME): str,
-                    vol.Required(CONF_MODEL): vol.In(QP_MODELS),
-                })
-
-                return self.async_show_form(
-                    step_id="user",
-                    data_schema=data_schema,
-                    errors=errors,
-                )
-
-            # Validate the input
-            mac = clean_mac_address(user_input[CONF_MAC])
-            await self.async_set_unique_id(mac)
-            self._abort_if_unique_id_configured()
-
-            validated_data = {
-                CONF_MAC: mac,
-                CONF_NAME: user_input[CONF_NAME],
-                CONF_MODEL: user_input.get(CONF_MODEL, DEFAULT_MODEL),  # Get the model or use default
-            }
-
-            # Create the config entry
-            _LOGGER.debug("Creating entry with data: %s", validated_data)
-            return self.async_create_entry(title=validated_data[CONF_NAME], data=validated_data)
-
-        except Exception as ex:
-            _LOGGER.error("Unexpected exception in Qingping CGxx config flow: %s", ex)
-            errors["base"] = "unknown"
-            return self.async_show_form(
-                step_id="user",
-                 data_schema=vol.Schema({
-                    vol.Required(CONF_MAC): vol.In(self._discovered_devices),
-                    vol.Required(CONF_NAME): str,
-                    vol.Required(CONF_MODEL): vol.In(QP_MODELS),
-                }),
-                errors=errors,
-            )
-
-    async def async_step_no_devices(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle the case when no devices are found."""
-        if user_input is None:
-            return self.async_show_form(
-                step_id="no_devices",
-                data_schema=vol.Schema({}),
-            )
-
-        # User clicked "Add Manually" button
-        return await self.async_step_manual()
-
-    async def async_step_manual(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle manual device configuration."""
-        errors = {}
-
-        if user_input is None:
-            return self.async_show_form(
-                step_id="manual",
-                data_schema=vol.Schema({
-                    vol.Required(CONF_NAME): str,
-                    vol.Required(CONF_MAC): str,
-                    vol.Required(CONF_MODEL): vol.In(QP_MODELS),
-                }),
-            )
+        @callback
+        def message_received(message):
+            if message.retain:
+                return
+            mac = maybe_normalize_mac(message.topic.split("/")[1])
+            if not mac:
+                return
+            if message.payload.startswith(b"CG"):
+                self._other_discovery[mac] = f"Qingping TLV · {mac}"
+                return
+            payload = parse_json_payload(message.payload)
+            if payload is None:
+                return
+            kind = str(payload.get("type", ""))
+            if kind in {"10", "25"}:
+                discovered[mac] = message.topic
+                self._other_discovery.pop(mac, None)
+            elif kind in {"12", "13", "15", "17", "21", "27"} and mac not in discovered:
+                self._other_discovery[mac] = f"Qingping JSON · {mac}"
+            if kind == "9" and (reading := decode_ble_report(payload)):
+                discovered[mac] = message.topic
+                remember_candidate(self.hass, mac, reading[0], reading[1].get("signal_strength"))
 
         try:
-            mac = clean_mac_address(user_input[CONF_MAC])
-            await self.async_set_unique_id(mac)
-            self._abort_if_unique_id_configured()
-
-            validated_data = {
-                CONF_MAC: mac,
-                CONF_NAME: user_input[CONF_NAME],
-                CONF_MODEL: user_input.get(CONF_MODEL, DEFAULT_MODEL),  # Get the model or use default
-            }
-
-            _LOGGER.debug("Creating manual entry with data: %s", validated_data)
-            return self.async_create_entry(title=validated_data[CONF_NAME], data=validated_data)
-        except Exception as ex:
-            _LOGGER.warning("Unexpected exception in manual config: %s", ex)
-            errors["base"] = "Device already configured, try a different mac address."
-            return self.async_show_form(
-                step_id="manual",
-                data_schema=vol.Schema({
-                    vol.Required(CONF_NAME): str,
-                    vol.Required(CONF_MAC): str,
-                    vol.Required(CONF_MODEL): vol.In(QP_MODELS),
-                }),
-                errors=errors,
-            )
-
-    async def _async_discover_devices(self):
-        """Discover available Qingping devices via MQTT and keep a cache of discovered BLE devices."""
-        try:
-            configured_devices = {
-                entry.unique_id for entry in self._async_current_entries()
-            }
-
-            domain_data = self.hass.data.setdefault(DOMAIN, {})
-            discovered_cache = domain_data.setdefault("discovered_devices_cache", {})
-            now = time.time()
-
-            # Cleanup old cache entries
-            expired = [
-                mac for mac, info in discovered_cache.items()
-                if now - info.get("last_seen", 0) > DISCOVERY_CACHE_TTL
-            ]
-            for mac in expired:
-                discovered_cache.pop(mac, None)
-
-            # Seed current discovery dialog from cache
-            self._discovered_devices = {
-                mac: info["name"]
-                for mac, info in discovered_cache.items()
-                if mac not in configured_devices
-            }
-
-            def _remember_device(mac: str, device_name: str) -> None:
-                discovered_cache[mac] = {
-                    "name": device_name,
-                    "last_seen": time.time(),
-                }
-                if mac not in configured_devices:
-                    self._discovered_devices[mac] = device_name
-
-            def _handle_message(msg):
-                """Handle received MQTT messages."""
-                try:
-                    mac = None
-                    device_name = None
-
-                    # TLV devices published directly
-                    if msg.payload[:2] == b"CG":
-                        topic_parts = msg.topic.split("/")
-                        if len(topic_parts) >= 3:
-                            mac = clean_mac_address(topic_parts[-2])
-                            if mac:
-                                device_name = f"Qingping TLV Device ({mac})"
-
-                    else:
-                        try:
-                            payload = json.loads(msg.payload.decode("utf-8", errors="ignore"))
-                        except Exception:
-                            return
-
-                        msg_type = str(payload.get("type", ""))
-
-                        # BLE relay packet from gateway
-                        if msg_type == "9" and payload.get("mac") and payload.get("adv_data"):
-                            mac = clean_mac_address(payload["mac"])
-                            if mac:
-                                device_name = f"Qingping BLE Device ({mac})"
-
-                        # Regular JSON devices
-                        else:
-                            topic_parts = msg.topic.split("/")
-                            if len(topic_parts) >= 3:
-                                topic_mac = clean_mac_address(topic_parts[-2])
-                                if topic_mac and msg_type in {"13", "15", "17", "21", "25", "26", "27"}:
-                                    mac = topic_mac
-                                    device_name = f"Qingping JSON ({mac})"
-
-                    if mac and device_name:
-                        was_known = mac in self._discovered_devices
-                        _remember_device(mac, device_name)
-                        if not was_known and mac not in configured_devices:
-                            _LOGGER.info("Discovered device: %s", device_name)
-
-                except Exception as ex:
-                    _LOGGER.error("Error handling MQTT message: %s", ex)
-
             unsubscribe = await mqtt.async_subscribe(
-                self.hass, f"{MQTT_TOPIC_PREFIX}/#", _handle_message, 1, encoding=None
+                self.hass, f"{MQTT_TOPIC_PREFIX}/+/up", message_received, 1, encoding=None
             )
+        except HomeAssistantError:
+            return discovered
+        try:
+            await asyncio.sleep(5)
+        finally:
+            unsubscribe()
+        return discovered
 
-            try:
-                # Short live scan window for newly arrived packets.
-                # Previously seen devices are still shown from cache.
-                await asyncio.sleep(10)
-            finally:
-                unsubscribe()
+    async def _async_create_device(self, data):
+        mac = data[CONF_MAC]
+        # Preserve entity IDs from older entries that stored a differently formatted address.
+        if any(
+            maybe_normalize_mac(entry.data.get(CONF_MAC) or entry.unique_id) == mac
+            for entry in self._async_current_entries()
+        ):
+            return self.async_abort(reason="already_configured")
+        await self.async_set_unique_id(mac)
+        self._abort_if_unique_id_configured()
+        return self.async_create_entry(title=data[CONF_NAME], data=data)
 
-            _LOGGER.info(
-                "Discovered %s Qingping devices (including cached BLE devices)",
-                len(self._discovered_devices),
-            )
+    async def async_step_gateway(self, user_input=None):
+        if self._gateway_discovery is None:
+            self._gateway_discovery = await self._async_scan_gateways()
+        errors = {}
+        if user_input is not None:
+            mac = maybe_normalize_mac(user_input.get(CONF_MAC) or user_input.get(_DISCOVERED))
+            if not mac:
+                errors[CONF_MAC] = "invalid_mac"
+            else:
+                data = {
+                    CONF_MAC: mac,
+                    CONF_NAME: user_input.get(CONF_NAME) or f"Qingping CGDN1 {mac[-4:]}",
+                    CONF_MODEL: "CGDN1",
+                    CONF_GATEWAY_UP_TOPIC: user_input.get(CONF_GATEWAY_UP_TOPIC) or self._gateway_discovery.get(mac, ""),
+                    CONF_GATEWAY_DOWN_TOPIC: user_input.get(CONF_GATEWAY_DOWN_TOPIC, ""),
+                }
+                if not _validate_topics(data):
+                    errors["base"] = "invalid_topics"
+                elif _topics_in_use(self.hass, mac, data):
+                    errors["base"] = "topics_in_use"
+                else:
+                    return await self._async_create_device(data)
+        choices = {_MANUAL: "—", **{mac: f"{mac} · {topic}" for mac, topic in self._gateway_discovery.items()}}
+        return self.async_show_form(step_id="gateway", data_schema=vol.Schema({
+            vol.Optional(_DISCOVERED, default=_MANUAL): vol.In(choices),
+            vol.Optional(CONF_MAC): str,
+            vol.Optional(CONF_NAME): str,
+            vol.Optional(CONF_GATEWAY_UP_TOPIC): str,
+            vol.Optional(CONF_GATEWAY_DOWN_TOPIC): str,
+        }), errors=errors)
 
-        except HomeAssistantError as ex:
-            _LOGGER.error("Error discovering Qingping devices: %s", ex)
-        except Exception as ex:
-            _LOGGER.error("Unexpected error in device discovery: %s", ex)
-    
+    async def async_step_ble(self, user_input=None):
+        gateways = _gateway_choices(self.hass)
+        if not gateways:
+            return self.async_abort(reason="no_gateway")
+        errors = {}
+        if user_input is not None:
+            selected = user_input.get(_DISCOVERED, _MANUAL)
+            observed_gateway, _, observed_mac = selected.partition("/")
+            mac = maybe_normalize_mac(user_input.get(CONF_MAC) or observed_mac)
+            gateway = user_input.get(CONF_GATEWAY_MAC) or observed_gateway
+            if not mac:
+                errors[CONF_MAC] = "invalid_mac"
+            if gateway not in gateways:
+                errors[CONF_GATEWAY_MAC] = "no_gateway"
+            if not errors:
+                return await self._async_create_device({
+                    CONF_MAC: mac,
+                    CONF_NAME: user_input.get(CONF_NAME) or f"CGDK2 {mac[-4:]}",
+                    CONF_MODEL: "CGDK2",
+                    CONF_GATEWAY_MAC: gateway,
+                    CONF_BLE_TIMEOUT: user_input[CONF_BLE_TIMEOUT],
+                })
+        configured = {
+            maybe_normalize_mac(entry.data.get(CONF_MAC) or entry.unique_id) for entry in self._async_current_entries()
+        }
+        choices = {_MANUAL: "—"}
+        candidates = self.hass.data.get(DOMAIN, {}).get(BLE_CANDIDATES, {})
+        for (gateway, mac), observation in sorted(candidates.items(), key=lambda item: -item[1]["last_seen"]):
+            if mac in configured or gateway not in gateways or time.time() - observation["last_seen"] > BLE_CANDIDATE_TTL:
+                continue
+            local = dt_util.as_local(datetime.fromtimestamp(observation["last_seen"], dt_util.UTC))
+            rssi = observation["rssi"]
+            signal = f" · {rssi} dBm" if rssi is not None else ""
+            choices[f"{gateway}/{mac}"] = f"{mac} · {gateways[gateway]}{signal} · {local:%m-%d %H:%M}"
+        for gateway, entry in gateway_entries(self.hass).items():
+            for mac, name in parse_ble_devices(entry_settings(entry).get(CONF_BLE_DEVICES)).items():
+                if mac not in configured:
+                    choices.setdefault(f"{gateway}/{mac}", f"{name} · {mac} · {gateways[gateway]}")
+        selected_gateway = next(iter(gateways)) if len(gateways) == 1 else _NO_GATEWAY
+        return self.async_show_form(step_id="ble", data_schema=vol.Schema({
+            vol.Optional(_DISCOVERED, default=_MANUAL): vol.In(choices),
+            vol.Optional(CONF_MAC): str,
+            vol.Optional(CONF_GATEWAY_MAC, default=selected_gateway): vol.In({_NO_GATEWAY: "—", **gateways}),
+            vol.Optional(CONF_NAME): str,
+            vol.Required(CONF_BLE_TIMEOUT, default=DEFAULT_BLE_TIMEOUT): vol.All(vol.Coerce(int), vol.Range(min=60, max=86400)),
+        }), errors=errors)
+
+    async def async_step_other(self, user_input=None):
+        if self._gateway_discovery is None:
+            self._gateway_discovery = await self._async_scan_gateways()
+        errors = {}
+        if user_input is not None:
+            if mac := maybe_normalize_mac(user_input.get(CONF_MAC) or user_input.get(_DISCOVERED)):
+                return await self._async_create_device({
+                    CONF_MAC: mac, CONF_NAME: user_input[CONF_NAME], CONF_MODEL: user_input[CONF_MODEL]
+                })
+            errors[CONF_MAC] = "invalid_mac"
+        return self.async_show_form(step_id="other", data_schema=vol.Schema({
+            vol.Optional(_DISCOVERED, default=_MANUAL): vol.In({_MANUAL: "—", **self._other_discovery}),
+            vol.Optional(CONF_MAC): str,
+            vol.Required(CONF_NAME): str,
+            vol.Required(CONF_MODEL, default="CGS1"): vol.In(
+                [model for model in QP_MODELS if model != "CGDN1" and model not in ADV_MODELS]
+            ),
+        }), errors=errors)
+
+    async def async_step_integration_discovery(self, discovery_info):
+        mac = maybe_normalize_mac(discovery_info.get(CONF_MAC))
+        gateway_mac = maybe_normalize_mac(discovery_info.get(CONF_GATEWAY_MAC))
+        gateways = gateway_entries(self.hass)
+        if not mac or gateway_mac not in gateways:
+            return self.async_abort(reason="no_gateway")
+        if any(
+            maybe_normalize_mac(entry.data.get(CONF_MAC) or entry.unique_id) == mac
+            for entry in self._async_current_entries()
+        ):
+            return self.async_abort(reason="already_configured")
+        await self.async_set_unique_id(mac)
+        self._abort_if_unique_id_configured()
+        self._discovery = {
+            CONF_MAC: mac, CONF_GATEWAY_MAC: gateway_mac,
+            CONF_MODEL: "CGDK2", CONF_NAME: f"CGDK2 {mac[-4:]}",
+        }
+        self.context["title_placeholders"] = {"name": self._discovery[CONF_NAME]}
+        if entry_settings(gateways[gateway_mac]).get(CONF_AUTO_ADD_BLE, False):
+            return self.async_create_entry(title=self._discovery[CONF_NAME], data=self._discovery)
+        return await self.async_step_confirm_ble()
+
+    async def async_step_confirm_ble(self, user_input=None):
+        gateways = _gateway_choices(self.hass)
+        selected = self._discovery[CONF_GATEWAY_MAC]
+        if selected not in gateways:
+            return self.async_abort(reason="no_gateway")
+        if user_input is not None:
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(title=user_input[CONF_NAME], data={**self._discovery, **user_input})
+        return self.async_show_form(
+            step_id="confirm_ble",
+            description_placeholders={"mac": self._discovery[CONF_MAC]},
+            data_schema=vol.Schema({
+                vol.Required(CONF_NAME, default=self._discovery[CONF_NAME]): str,
+                vol.Required(CONF_GATEWAY_MAC, default=selected): vol.In(gateways),
+            }),
+        )
+
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        """Get the options flow for this handler."""
-        return OptionsFlowHandler()
-    
+        return OptionsFlowHandler(config_entry)
+
+
 class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for Qingping CGS1."""
+    """Persist gateway settings or change a sensor's owning gateway."""
 
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Manage the options."""
+    def __init__(self, config_entry):
+        self._entry = config_entry
+
+    async def async_step_init(self, user_input=None):
+        model = entry_settings(self._entry)[CONF_MODEL]
+        if model in ADV_MODELS:
+            return await self.async_step_sensor_options(user_input)
+        if model == "CGDN1":
+            return await self.async_step_gateway_options(user_input)
+        return await self.async_step_device_options(user_input)
+
+    async def _async_save(self, changes):
+        data = {**entry_settings(self._entry), **changes}
+        if changes.get(CONF_MODEL) == "CGDN1" and "timezone" in self._entry.options:
+            data["timezone_wire"] = self._entry.options["timezone"]
+        self.hass.config_entries.async_update_entry(self._entry, data=data, options={})
+        await self.hass.config_entries.async_reload(self._entry.entry_id)
+        return self.async_create_entry(title="", data={})
+
+    async def async_step_gateway_options(self, user_input=None):
+        settings = entry_settings(self._entry)
+        errors = {}
         if user_input is not None:
-            # Update the config entry
-            new_data = {
-                **self.config_entry.data,
-                CONF_MODEL: user_input[CONF_MODEL],
-                CONF_BLE_DEVICES: user_input.get(CONF_BLE_DEVICES, ""),
-                CONF_TEMPORARY_REPORT_INTERVAL: user_input.get(CONF_TEMPORARY_REPORT_INTERVAL, DEFAULT_TEMPORARY_REPORT_INTERVAL),
-                CONF_TEMPORARY_REPORT_DURATION: user_input.get(CONF_TEMPORARY_REPORT_DURATION, DEFAULT_TEMPORARY_REPORT_DURATION),
-                CONF_TEMPORARY_REPORT_REFRESH: user_input.get(CONF_TEMPORARY_REPORT_REFRESH, DEFAULT_TEMPORARY_REPORT_REFRESH),
-                CONF_CONFIGURE_GATEWAY_ON_START: user_input.get(CONF_CONFIGURE_GATEWAY_ON_START, False),
-                CONF_CONFIGURE_GATEWAY_ON_RECONNECT: user_input.get(CONF_CONFIGURE_GATEWAY_ON_RECONNECT, False),
-                CONF_REPORT_INTERVAL: user_input.get(CONF_REPORT_INTERVAL, DEFAULT_TEMPORARY_REPORT_INTERVAL),
-                CONF_COLLECT_INTERVAL: user_input.get(CONF_COLLECT_INTERVAL, 10),
-                CONF_CO2_SAMPLING_INTERVAL: user_input.get(CONF_CO2_SAMPLING_INTERVAL, 10),
-                CONF_PM_SAMPLING_INTERVAL: user_input.get(CONF_PM_SAMPLING_INTERVAL, 10),
-                CONF_TEMPERATURE_UNIT: user_input.get(CONF_TEMPERATURE_UNIT, "C"),
-                CONF_TIMEZONE: user_input.get(CONF_TIMEZONE, 20),
-            }
-            
-            self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                data=new_data,
-            )
-            
-            # Reload the integration to apply changes
-            await self.hass.config_entries.async_reload(self._config_entry_id)
-            
-            return self.async_create_entry(title="", data=user_input)
+            if not _validate_topics(user_input):
+                errors["base"] = "invalid_topics"
+            elif _topics_in_use(self.hass, maybe_normalize_mac(settings[CONF_MAC]), user_input):
+                errors["base"] = "topics_in_use"
+            elif user_input[CONF_TEMPORARY_REPORT] and user_input[CONF_TEMPORARY_REPORT_DURATION] <= user_input[CONF_TEMPORARY_REPORT_INTERVAL]:
+                errors[CONF_TEMPORARY_REPORT_DURATION] = "duration_too_short"
+            else:
+                return await self._async_save(user_input)
+        return self.async_show_form(step_id="gateway_options", data_schema=vol.Schema({
+            vol.Required(CONF_MODEL, default=settings[CONF_MODEL]): vol.In(
+                [model for model in QP_MODELS if model not in ADV_MODELS]
+            ),
+            **_settings_schema(settings),
+        }), errors=errors)
 
+    async def async_step_device_options(self, user_input=None):
+        if user_input is not None:
+            return await self._async_save(user_input)
         return self.async_show_form(
-            step_id="init",
+            step_id="device_options",
             data_schema=vol.Schema({
-                vol.Required(
-                    CONF_MODEL,
-                    default=self.config_entry.data.get(CONF_MODEL, DEFAULT_MODEL)
-                ): vol.In(QP_MODELS),
-                vol.Optional(
-                    CONF_BLE_DEVICES,
-                    default=self.config_entry.data.get(CONF_BLE_DEVICES, "")
-                ): str,
-                vol.Optional(
-                    CONF_TEMPORARY_REPORT_INTERVAL,
-                    default=self.config_entry.data.get(CONF_TEMPORARY_REPORT_INTERVAL, DEFAULT_TEMPORARY_REPORT_INTERVAL)
-                ): vol.Coerce(int),
-                vol.Optional(
-                    CONF_TEMPORARY_REPORT_DURATION,
-                    default=self.config_entry.data.get(CONF_TEMPORARY_REPORT_DURATION, DEFAULT_TEMPORARY_REPORT_DURATION)
-                ): vol.Coerce(int),
-                vol.Optional(
-                    CONF_TEMPORARY_REPORT_REFRESH,
-                    default=self.config_entry.data.get(CONF_TEMPORARY_REPORT_REFRESH, DEFAULT_TEMPORARY_REPORT_REFRESH)
-                ): vol.Coerce(int),
-                vol.Optional(
-                    CONF_CONFIGURE_GATEWAY_ON_START,
-                    default=self.config_entry.data.get(CONF_CONFIGURE_GATEWAY_ON_START, False)
-                ): bool,
-                vol.Optional(
-                    CONF_CONFIGURE_GATEWAY_ON_RECONNECT,
-                    default=self.config_entry.data.get(CONF_CONFIGURE_GATEWAY_ON_RECONNECT, False)
-                ): bool,
-                vol.Optional(
-                    CONF_REPORT_INTERVAL,
-                    default=self.config_entry.data.get(CONF_REPORT_INTERVAL, DEFAULT_TEMPORARY_REPORT_INTERVAL)
-                ): vol.Coerce(int),
-                vol.Optional(
-                    CONF_COLLECT_INTERVAL,
-                    default=self.config_entry.data.get(CONF_COLLECT_INTERVAL, 10)
-                ): vol.Coerce(int),
-                vol.Optional(
-                    CONF_CO2_SAMPLING_INTERVAL,
-                    default=self.config_entry.data.get(CONF_CO2_SAMPLING_INTERVAL, 10)
-                ): vol.Coerce(int),
-                vol.Optional(
-                    CONF_PM_SAMPLING_INTERVAL,
-                    default=self.config_entry.data.get(CONF_PM_SAMPLING_INTERVAL, 10)
-                ): vol.Coerce(int),
-                vol.Optional(
-                    CONF_TEMPERATURE_UNIT,
-                    default=self.config_entry.data.get(CONF_TEMPERATURE_UNIT, "C")
-                ): vol.In(["C", "F"]),
-                vol.Optional(
-                    CONF_TIMEZONE,
-                    default=self.config_entry.data.get(CONF_TIMEZONE, 20)
-                ): vol.Coerce(int),
+                vol.Required(CONF_MODEL, default=entry_settings(self._entry)[CONF_MODEL]): vol.In(
+                    [model for model in QP_MODELS if model not in ADV_MODELS]
+                )
             }),
         )
+
+    async def async_step_sensor_options(self, user_input=None):
+        gateways = gateway_entries(self.hass)
+        settings = entry_settings(self._entry)
+        if user_input is not None:
+            await self._async_save(user_input)
+            from . import async_sync_gateway_membership
+
+            await async_sync_gateway_membership(self.hass)
+            return self.async_create_entry(title="", data={})
+        selected = resolve_gateway(settings, gateways) or _NO_GATEWAY
+        choices = {_NO_GATEWAY: "—", **_gateway_choices(self.hass)}
+        if selected not in choices:
+            choices[selected] = selected
+        return self.async_show_form(step_id="sensor_options", data_schema=vol.Schema({
+            vol.Required(CONF_GATEWAY_MAC, default=selected): vol.In(choices),
+            vol.Required(CONF_BLE_TIMEOUT, default=settings.get(CONF_BLE_TIMEOUT, DEFAULT_BLE_TIMEOUT)):
+                vol.All(vol.Coerce(int), vol.Range(min=60, max=86400)),
+        }))

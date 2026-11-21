@@ -1,9 +1,6 @@
 """Support for Qingping Device button entities."""
 from __future__ import annotations
 
-import json
-import logging
-
 from homeassistant.components.button import ButtonEntity
 from homeassistant.components import mqtt
 from homeassistant.config_entries import ConfigEntry
@@ -13,10 +10,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.exceptions import HomeAssistantError
-
-from .const import DOMAIN, MQTT_TOPIC_PREFIX
-
-_LOGGER = logging.getLogger(__name__)
 
 from .const import DOMAIN, TLV_MODELS, ADV_MODELS
 from .tlv_encoder import tlv_encode
@@ -44,9 +37,11 @@ async def async_setup_entry(
     entities = []
 
     if model == "CGDN1":
-        entities.append(
-            QingpingDeviceManualCalibrationButton(config_entry, mac, name, device_info)
-        )
+        entities.extend([
+            QingpingDeviceManualCalibrationButton(config_entry, mac, name, device_info),
+            QingpingGatewayButton(config_entry, mac, device_info, "sync_ble_devices", "async_sync_devices", True),
+            QingpingGatewayButton(config_entry, mac, device_info, "read_gateway_settings", "async_read_settings"),
+        ])
 
     # Add CO2 calibration button for TLV devices with CO2 sensor
     if model in TLV_MODELS and model in ["CGP22C", "CGR1W", "CGR1PW"]:
@@ -99,13 +94,26 @@ class QingpingDeviceManualCalibrationButton(ButtonEntity):
 
     async def async_press(self) -> None:
         """Handle the button press."""
-        try:
-            payload = {"type": "29"}
-            topic = f"{MQTT_TOPIC_PREFIX}/{self._mac}/down"
-            
-            _LOGGER.info("Triggering manual calibration for %s", self._mac)
-            await mqtt.async_publish(self.hass, topic, json.dumps(payload))
-            
-        except Exception as err:
-            _LOGGER.error("Failed to trigger manual calibration: %s", err)
-            raise HomeAssistantError(f"Failed to trigger calibration: {err}")
+        handler = self.hass.data[DOMAIN].get(self._config_entry.entry_id, {}).get("private_handler")
+        if handler is None or not await handler.async_publish({"type": "29"}):
+            raise HomeAssistantError("Could not send the Qingping calibration request")
+
+
+class QingpingGatewayButton(ButtonEntity):
+    """Provide direct access to gateway commands on its device page."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, entry, mac, device_info, translation_key, method, *args):
+        self._entry = entry
+        self._method = method
+        self._args = args
+        self._attr_unique_id = f"{mac}_{translation_key}"
+        self._attr_translation_key = translation_key
+        self._attr_device_info = device_info
+
+    async def async_press(self) -> None:
+        handler = self.hass.data[DOMAIN].get(self._entry.entry_id, {}).get("private_handler")
+        if handler is None or not await getattr(handler, self._method)(*self._args):
+            raise HomeAssistantError("Could not publish to the Qingping gateway")

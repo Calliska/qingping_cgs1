@@ -1,22 +1,34 @@
-# Qingping integration for Home Assistant
+# Qingping integration for Home Assistant · Calliska fork
 
 <img src="https://brands.home-assistant.io/qingping_cgs1/dark_icon.png" alt="Qingping CGSx Icon" width="150" align="left" style="margin-right: 20px;">
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs) ![Download](https://img.shields.io/github/downloads/mash2k3/qingping_cgs1/total.svg?label=Downloads) ![Analytics](https://img.shields.io/badge/dynamic/json?label=Installs&cacheSeconds=15600&url=https://analytics.home-assistant.io/custom_integrations.json&query=$.qingping_cgs1.total)
+[![HACS custom repository](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.dev/) [Releases](https://github.com/Calliska/qingping_cgs1/releases)
 
-This custom component integrates the Qingping devices with Home Assistant, allowing you to monitor various environmental parameters in realtime.
+This fork of [mash2k3/qingping_cgs1](https://github.com/mash2k3/qingping_cgs1) keeps the Qingping Wi-Fi monitoring integration and adds CGDK2 temperature and humidity sensors relayed by CGDN1 Air Monitor Lite gateways over private MQTT.
 <br /><br /><br />
+
+## What this fork adds
+
+- CGDN1 private MQTT gateway support with separate topics, connection status and BLE membership per gateway.
+- CGDK2 decoding for temperature, humidity, battery and RSSI. Historical data cannot replace newer measurements.
+- Native Home Assistant setup for confirmed BLE discovery, manual entry and reassignment. Hands-free enrollment can be enabled for an individual gateway.
+- Temporary MQTT report settings, persistent gateway settings, settings readback and diagnostics with requested and observed report intervals.
+- In-place migration of existing configuration entries. Existing entity IDs are preserved, and older BLE assignments are inferred when unambiguous.
+
+This fork and upstream use the same integration domain, `qingping_cgs1`. Install one copy per Home Assistant instance. See the [`1.3.1_beta1` release](https://github.com/Calliska/qingping_cgs1/releases/tag/1.3.1_beta1).
+
 ## Requirements
 
 - MQTT integration installed and configured.
-- Enable MQTT on Qingping devices using instructions below.
-- HACS installed.
+- Configure Qingping Wi-Fi devices for private MQTT. CGDK2 sensors have no MQTT settings of their own.
+- For HACS installation, add this fork as a custom **Integration** repository.
 
 ## Supported Devices
 
 |   | Model | MQTT Format |
 |---|-------|-------------|
 | <img width="64" height="64" alt="image" src="https://github.com/user-attachments/assets/860613a7-2b3d-4cd6-a77c-a007195277b2" /> | Air Monitor Lite `(CGDN1)` | JSON |
+| | Temp & RH Monitor Lite `(CGDK2)` | BLE advertisements and sensor reports via CGDN1 |
 | <img width="64" height="74" alt="image" src="https://github.com/user-attachments/assets/8be6d4fc-bf5f-4c2d-b8f4-2c406e70aa88" /> | Air Monitor Pro `(CGS1)` | JSON |
 | <img width="64" height="74" alt="image" src="https://github.com/user-attachments/assets/394e61fa-47d8-46e3-a034-041122daf1e4" /> | Air Monitor Pro 2 `(CGS2)` | JSON |
 | <img width="64" height="64" alt="image" src="https://github.com/user-attachments/assets/dee1356d-1c6b-4fcc-9640-77772e87b652" /> | Temp & RH Monitor Pro S `(CGP22W)` | TLV Binary |
@@ -39,45 +51,65 @@ This custom component integrates the Qingping devices with Home Assistant, allow
 
 ## Installation
 
-> [!NOTE]
-> Before you begin you must enable mqtt on the device. Follow the instructions provided by GreyEarl [here](https://github.com/mash2k3/qingping_cgs1/blob/main/enableMQTT.md).
-> </br> Client ID, Up Topic and Down Topic must be filled out extacly as shown in [example](https://github.com/user-attachments/assets/48b19fc4-78a5-464c-9a65-cc164d0e3571).
-</br>After that is complete continue with HACS installation.
+1. Configure MQTT on the Wi-Fi device using [the private MQTT setup guide](enableMQTT.md). The default topics are `qingping/<MAC>/up` and `qingping/<MAC>/down`. Use a unique MQTT client ID for each gateway.
+2. In HACS, add `https://github.com/Calliska/qingping_cgs1` as a custom **Integration** repository. If HACS manages the upstream copy, switch the managed repository and keep the existing Qingping entries under **Devices & services**. Back up your HA configuration before upgrading to the beta.
+3. Choose release `1.3.1_beta1` in the fork's download version selector. Enable beta versions if your HACS UI filters them out. Restart Home Assistant to apply the update.
+4. To install manually, extract the release asset `qingping_cgs1.zip` into `custom_components/qingping_cgs1` in the HA configuration directory. Its `manifest.json` should be directly inside that directory. Restart Home Assistant.
 
-1. Use HACS to install this integration:
-   <br /><br /><a href="https://my.home-assistant.io/redirect/hacs_repository/?repository=qingping_cgs1&category=integration&owner=mash2k3" target="_blank" rel="noreferrer noopener"><img src="https://my.home-assistant.io/badges/hacs_repository.svg" alt="Open your Home Assistant instance and open a repository inside the Home Assistant Community Store." /></a>
-2. Download the Qingping repository.
-3. Restart Home Assistant
-4. Go to "Configuration" -> "Integrations" and click "+" to add a new integration
-5. Search for "Qingping" and follow the configuration steps
+## Configure a CGDN1 gateway
 
-## Configuration
+1. Go to **Settings → Devices & services → Add integration → Qingping → Add a CGDN1 gateway**.
+2. Select the gateway when detected, or enter its MAC address. If you configured custom MQTT topics, enter their exact case-sensitive names. Set both topics when the reporting topic does not end in `/up`.
+3. Open the CGDN1 device. Use **Read gateway settings** to request settings from the gateway and **Synchronize BLE devices** to publish its assigned list. The diagnostics files and device status show MQTT activity and observed timing.
+4. For a second gateway, repeat the setup with its own MAC, client ID and topics. Keep separate topic pairs for the two gateways.
 
-<img src="https://github.com/user-attachments/assets/8c712b1f-e13d-424b-8239-16046bbf50ff" alt="Device Discovery" width="250" align="left" ></img>
-- The integration supports automatic discovery of Qingping devices.<br /> 
-`⚠️ For discovery: JSON devices must be actively sending data, while TLV devices require a 2-second button press to appear in the list.`
-- Make sure to select the correct model from dropdown in order to get the correct sensors.
-- If your device is not discovered automatically, you can add it manually by providing the MAC address. 
-`⚠️ Do not include : in your MAC address. example: 532D38701E1F`
-<br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
+An existing Air Monitor Lite saved as `CGS1` can answer gateway list requests if it sends `10` or `25`. Set its model to `CGDN1` in **Configure** to expose all gateway controls and options.
 
-### CGDN1 gateway and CGDK2 BLE devices
+## Add a CGDK2 BLE sensor
 
-CGDN1 works as an MQTT gateway. CGDK2 devices are BLE sensors behind that gateway.
+CGDK2 broadcasts measurements over BLE. CGDN1 receives the compatible Qingping advertisements and relays them over MQTT. This workflow is passive, so the integration does not open a persistent BLE connection or ask for a pairing code. The gateway firmware controls what it scans and forwards.
 
-- Add the gateway entry as model `CGDN1`.
-- Add each BLE sensor entry as model `CGDK2`.
-- When the gateway sends `{"type":"10"}`, the integration replies with `{"type":"11","dev_list":[...]}` using the configured CGDK2 entries.
-- If the automatic list is not enough, set the gateway option `CGDN1 BLE devices` to a JSON list or comma-separated MACs, for example:
+- **Discover and confirm.** Keep the sensor with a working battery within range of the gateway. When the gateway relays a valid CGDK2 advertisement, HA shows a discovered Qingping device in **Devices & services**. Select **Configure**, check the name and gateway, and submit.
+- **Add automatically.** In that gateway's **Configure** dialog, enable **Automatically add discovered CGDK2 sensors**. While enabled, a valid new advertisement creates a sensor entry assigned to that gateway. Use this when you want that gateway to enroll any compatible CGDK2 it can hear. To add an already pending discovery, confirm it in **Devices & services**.
+- **Enter the MAC manually.** If the firmware does not forward a sensor before it is listed, use **Qingping → Add a CGDK2 BLE sensor**. Enter the 12-digit BLE MAC, choose its gateway, and name it. Manual input is available even when other sensors have been discovered. Once the entry is created, the integration sends the gateway an updated list. **Synchronize BLE devices** can retry publication.
+- **Move or remove a sensor.** Open its **Configure** dialog and select a different gateway or leave it unassigned. The integration reconciles the lists on both gateways. Removing the entry also removes any matching address from imported legacy lists. If hands-free enrollment is enabled and the same gateway still hears a deleted sensor, it can discover it again. Use HA's discovery ignore action or disable hands-free enrollment to prevent that.
 
-```json
-[
-  {"mac": "582D34885C15", "name": "CGDK2 5C15"},
-  {"mac": "582D34885C16", "name": "CGDK2 5C16"}
-]
-```
+Verify that the CGDK2 page has fresh temperature and humidity and shows its assigned gateway. In MQTT, watch for the CGDK2 MAC in an uplink `type: "9"` report. Some firmware also relays measurements in `12` or `17`. Seeing only the lists `11` and `26` confirms publication, while a fresh reading confirms receipt of usable data. If you see no supported frames even with the MAC listed and the sensor near the gateway, check that the sensor model is CGDK2, check its battery and confirm that your gateway firmware supports relaying this sensor. Some hardware variants advertise encrypted MiBeacon and need a receiver/parser that supports that format.
 
-The integration publishes CGDN1 private protocol commands only to the gateway down topic. CGDK2 entries listen for relayed BLE packets and do not publish MQTT configuration commands themselves.
+## MQTT intervals and availability
+
+- **Temporary MQTT Report Interval** on the CGDN1 device sends command `12` and stores the selected value. For example, enter **125 s** and check the gateway status attributes for **requested MQTT interval**, **observed MQTT interval**, and **interval status**. The integration uses successive real-time gateway reports to verify the cadence. Identical HA states may be omitted from history, so use raw MQTT to measure it independently.
+- **Configure** on the gateway sets the temporary duration and renewal interval. It also offers the persistent report and measurement settings. Apply persistent settings with the gateway action or explicitly enable application on startup or reconnect. The integration asks for settings readback with `28` on supported firmware.
+- The gateway's MQTT interval controls reporting to HA. CGDK2 radio and measurement intervals depend on the sensor firmware. Qingping's public gateway protocol does not specify a CGDK2 command to change those intervals.
+- CGDN1 heartbeat, measurement freshness, and BLE sensor availability are tracked independently. A BLE sensor defaults to a **600-second timeout**, configurable from its options. The **Status** sensor lists the reason for an outage and the last accepted packet and measurement. For example, `mqtt_disconnected` points to the broker, `gateway_unavailable` to the configured route and `packet_timeout` to missing valid messages for the device.
+- **Download diagnostics** from the integration entry to get redacted reporting details. In the MQTT integration's **Listen to a topic** panel, watch both gateway topics to distinguish a broker or gateway interruption from missing packets for just one MAC. Filter history reports by their measurement timestamps.
+
+### Protocol and migration notes
+
+| MQTT direction | Messages |
+| --- | --- |
+| Gateway → HA | `9` BLE advertisement, `10` list request, `13` heartbeat, `14` reconnect, `25` named list request |
+| HA → gateway | `11` MAC list, `12` temporary report mode, `17` persistent settings, `18` history ACK, `26` named list |
+| Gateway → HA reports | `12` real-time data, `17` history, `28` settings response |
+| HA → gateway query | `28` settings request |
+
+See the [Qingping JSON MQTT protocol](https://developer.qingping.co/private/communication-protocols/public-mqtt-json). Gateway capabilities and rate limits vary by firmware. This beta is intended for verifying the physical BLE and MQTT link on your installation.
+
+The migration keeps device and entity identifiers. An unambiguous old MAC list or a single gateway can establish the initial sensor assignment. If lists conflict, open the sensor's **Configure** dialog and choose the owner. MACs kept in older explicit lists remain available as candidates even before creating an HA sensor. Removing a gateway leaves its explicitly assigned sensors available for reassignment.
+
+If your CGDN1 still had the default 60-second temporary interval, an interval entered in its legacy **Update Interval** control is carried over to the new control. A separately configured non-default temporary interval takes priority.
+
+### Gateway actions
+
+| Action | Purpose |
+| --- | --- |
+| `qingping_cgs1.refresh_ble_devices` | Publish the selected gateway's `11` and `26` lists again. |
+| `qingping_cgs1.enable_temporary_report` | Send `12` using the configured interval and duration, or values supplied to the action. |
+| `qingping_cgs1.enable_diagnostic_report` | Request 10-second MQTT reports for 10 minutes. |
+| `qingping_cgs1.configure_gateway_settings` | Publish the persistent settings and request readback. |
+| `qingping_cgs1.read_gateway_settings` | Ask the gateway to report its current settings. |
+
+Pass `gateway_mac` to target one gateway. Without it, the actions target all loaded CGDN1 gateways.
 
 ## How it Works
 <img src="https://github.com/user-attachments/assets/55a42477-59a7-48b6-b70b-f743c5e2a69a" alt="Device Discovery" width="275" align="right">
@@ -134,14 +166,14 @@ The integration publishes CGDN1 private protocol commands only to the gateway do
 7. **Offset Adjustments**: The integration allows you to set offset values for sesor readings. These offsets are applied to the device before it's displayed in Home Assistant.
 
 8. **Reporting**: You can configure how often the device should report new data.
-   - **Update Interval**: This is done through a number entity that allows you to set the update interval in seconds. `Only on JSON Devices, JSON devices only support realtime data on this integration`
+   - **Update Interval**: Use the number entity for JSON devices. On CGDN1 it is named **Temporary MQTT Report Interval**. See [MQTT intervals and availability](#mqtt-intervals-and-availability).
    - **Report Interval**: How often device sends data (10-60 minutes, historic mode only) `Only on TLV Devices`
    - **Sample Interval**: How often device reads sensors (10-300 seconds, historic mode only) `Only on TLV Devices`
    - **Report Mode**: Manual override for real-time/historic mode `Only on TLV Devices`
 
 9. **Configuration Publishing**: The integration periodically publishes configuration messages to the device via MQTT. This ensures that the device maintains the correct reporting interval, realtime reporting and other settings. `⚠️ Note: For battery operating TLV devices, configuration changes only work while device is plugged into USB power`
 
-10. **Status Monitoring**:
+10. **Status Monitoring for standalone MQTT devices**:
     - Real-time mode: Offline after 5 minutes of no activity. `JSON and TLV Devices`
     - Historic mode: Offline after 15 minutes of no activity. `Only on TLV Devices`
 
@@ -174,7 +206,7 @@ Contributions to this project are welcome! Please feel free to submit a Pull Req
 
 ## Support
 
-If you have any questions or need help, please open an issue on GitHub.
+If you have any questions or need help, please open an [issue in the Calliska fork](https://github.com/Calliska/qingping_cgs1/issues).
 
 ## Acknowledgments
 

@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import time, math
 import asyncio
 
 from homeassistant.components import mqtt
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY, ConfigEntry
 from homeassistant.const import CONF_NAME, CONF_MAC, CONF_MODEL, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -29,12 +29,14 @@ from .const import (
     DEFAULT_TYPE, DEFAULT_DURATION, TLV_MODELS, JSON_MODELS,
     CONF_REPORT_MODE, REPORT_MODE_HISTORIC, REPORT_MODE_REALTIME, ADV_MODELS
 )
+from .const import CONF_BLE_TIMEOUT, CONF_GATEWAY_MAC, CONF_GATEWAY_UP_TOPIC, DEFAULT_BLE_TIMEOUT
 from .tlv_decoder import tlv_decode, is_tlv_format
 from .tlv_encoder import tlv_encode, int_to_bytes_little_endian
 
-from .adv_decoder import decode_qingping_adv_data
 from .private_mqtt import QingpingPrivateGatewayHandler
-from .qingping_private import maybe_normalize_mac, up_topic_variants
+from .qingping_private import maybe_normalize_mac, parse_json_payload, up_topic_variants
+from .reports import Readings, decode_ble_report
+from .topology import BLE_CANDIDATES, entry_settings, gateway_entries, remember_candidate, resolve_gateway
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,6 +104,12 @@ async def _auto_switch_report_mode_on_battery_state(hass, config_entry, mac, is_
     
 async def publish_setting_change(hass: HomeAssistant, mac: str, setting_key: str, value: any) -> None:
     """Publish a single setting change to the device with debounce."""
+    gateway = gateway_entries(hass).get(maybe_normalize_mac(mac))
+    if gateway:
+        handler = hass.data[DOMAIN].get(gateway.entry_id, {}).get("private_handler")
+        if handler is None or not await handler.async_set_setting(setting_key, value):
+            raise HomeAssistantError("Could not send the Qingping gateway setting")
+        return
     # Cancel any pending publish for this setting
     publish_key = f"{mac}_{setting_key}"
     if publish_key in _pending_setting_publishes:
@@ -283,12 +291,6 @@ async def async_setup_entry(
     elif model == "CGS2" and CONF_ETVOC_UNIT not in coordinator.data:
         coordinator.data[CONF_ETVOC_UNIT] = config_entry.data.get(CONF_ETVOC_UNIT, "index")
 
-    async def async_update_data():
-        """Fetch data from API endpoint."""
-        # This is a placeholder. In a real scenario, you might
-        # fetch data from an API or process local data here.
-        return {}
-
     device_info = {
         "identifiers": {(DOMAIN, mac)},
         "name": name,
@@ -455,16 +457,17 @@ async def async_setup_entry(
 
     async_add_entities(sensors)
 
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN].setdefault(config_entry.entry_id, {})
-    hass.data[DOMAIN][config_entry.entry_id]["sensors"] = sensors
+    runtime = hass.data[DOMAIN][config_entry.entry_id]
+    runtime["sensors"] = sensors
+    runtime["status_sensor"] = status_sensor
+    readings = Readings()
+    expected_mac = maybe_normalize_mac(mac)
 
     private_handler = None
     if model == "CGDN1":
         private_handler = QingpingPrivateGatewayHandler(hass, config_entry)
-        hass.data[DOMAIN][config_entry.entry_id]["private_handler"] = private_handler
-        _LOGGER.info("Created CGDN1 private MQTT handler for %s", mac)
-        hass.async_create_task(private_handler.async_start())
+        runtime["private_handler"] = private_handler
+        config_entry.async_on_unload(private_handler.async_stop)
 
     if model in TLV_MODELS:
         await _send_initial_tlv_config(hass, config_entry, mac, model)
@@ -525,173 +528,136 @@ async def async_setup_entry(
                 if sensor._sensor_type == SENSOR_BATTERY and battery_charging is not None:
                     sensor.update_battery_charging(battery_charging)
 
-    @callback
-    def message_received(message):
-        """Handle new MQTT messages."""
+    def _write_report(values):
+        if values:
+            _update_sensors_from_json_sensor_data([values])
+
+    def _accept_ble_report(payload, decoded=None):
+        if not status_sensor.hass:
+            return
+        now = time.time()
+        historic = str(payload.get("type")) == "17"
+        rows = [decoded] if decoded is not None else payload.get("sensorData")
+        valid, values = readings.accept(
+            rows, now, historic=historic, fallback_timestamp=payload.get("timestamp"),
+            allowed={SENSOR_TEMPERATURE, SENSOR_HUMIDITY, SENSOR_BATTERY, SENSOR_SIGNAL_STRENGTH},
+        )
+        runtime["last_measurement_at"] = readings.last_measurement_at
+        fresh_history = (
+            values and readings.last_measurement_at is not None
+            and now - readings.last_measurement_at <= status_sensor.ble_timeout
+        )
+        if valid and (not historic or fresh_history):
+            runtime["last_packet_at"] = int(now)
+            status_sensor.update_timestamp(now)
+            if mac_sensor.hass:
+                mac_sensor.update_mac(expected_mac)
+        _write_report(values)
+
+    def _route_to_ble(sensor_mac, payload, decoded=None):
+        gateways = gateway_entries(hass)
+        for entry in hass.config_entries.async_entries(DOMAIN, include_disabled=False):
+            settings = entry_settings(entry)
+            if settings.get(CONF_MODEL) not in ADV_MODELS or maybe_normalize_mac(settings.get(CONF_MAC)) != sensor_mac:
+                continue
+            if resolve_gateway(settings, gateways) == expected_mac:
+                child = hass.data[DOMAIN].get(entry.entry_id, {})
+                if receiver := child.get("ble_receiver"):
+                    receiver(payload, decoded)
+            return
+
+    def _handle_gateway_report(payload, kind):
+        now = time.time()
+        if str(payload.get("type")) not in {"12", "17"} or not status_sensor.hass:
+            return False
+        valid, values = readings.accept(
+            payload.get("sensorData"), now, historic=kind == "17",
+            fallback_timestamp=payload.get("timestamp"),
+        )
+        if valid:
+            _write_report(values)
+            runtime["last_measurement_at"] = readings.last_measurement_at
+            if type_sensor and type_sensor.hass:
+                type_sensor.update_type(kind)
+        return valid
+
+    async def message_received(message):
+        """Route one MQTT message from an exact, configured up topic."""
         nonlocal private_handler
-        try:
-            # Check if TLV binary format
-            if is_tlv_format(message.payload):
+        if message.retain or message.topic not in topics or hass.data[DOMAIN].get(config_entry.entry_id) is not runtime:
+            return
+        if is_tlv_format(message.payload):
+            if model in TLV_MODELS:
                 _handle_tlv_message(message)
-                return
-            
-            # Otherwise handle as JSON
-            payload = json.loads(message.payload)
-            
-            if not isinstance(payload, dict):
-                _LOGGER.error("Payload is not a dictionary")
-                return
+            return
+        if (payload := parse_json_payload(message.payload)) is None:
+            _LOGGER.debug("Ignoring invalid Qingping JSON on %s", message.topic)
+            return
 
-            message_type = str(payload.get("type", ""))
-            topic_parts = message.topic.split("/")
-            topic_mac = maybe_normalize_mac(topic_parts[1]) if len(topic_parts) >= 3 else None
-            expected_topic_mac = maybe_normalize_mac(mac)
-            topic_matches_entry = topic_mac == expected_topic_mac
+        kind = str(payload.get("type", ""))
+        incoming_mac = maybe_normalize_mac(payload.get("mac"))
+        if private_handler is None and model in JSON_MODELS and kind in {"10", "25"}:
+            _LOGGER.warning("Qingping %s requests a BLE list. Select CGDN1 in integration options", expected_mac)
+            private_handler = QingpingPrivateGatewayHandler(hass, config_entry)
+            runtime["private_handler"] = private_handler
+            config_entry.async_on_unload(private_handler.async_stop)
+            await private_handler.async_start(initialize=False)
 
-            if (
-                private_handler is None
-                and message_type in {"10", "25"}
-                and topic_matches_entry
-                and model not in ADV_MODELS
-            ):
-                _LOGGER.warning(
-                    "Device %s is configured as %s but sent CGDN1 gateway request type %s; enabling private MQTT handler for this runtime only. Set the model to CGDN1 in options if this device is a gateway",
-                    mac,
-                    model,
-                    message_type,
-                )
-                private_handler = QingpingPrivateGatewayHandler(hass, config_entry)
-                hass.data[DOMAIN][config_entry.entry_id]["private_handler"] = private_handler
-                hass.async_create_task(private_handler.async_start(initialize=False))
-
-            if private_handler is not None:
-                if not topic_matches_entry:
+        if private_handler is not None:
+            own_report = False
+            relay = None
+            if kind == "9":
+                if (advertisement := decode_ble_report(payload)) is None:
                     return
-                hass.async_create_task(private_handler.async_handle_message(payload, message.topic))
-                if message_type in {"10", "13", "14", "25"}:
-                    return
+                sensor_mac, decoded = advertisement
+                key = expected_mac, sensor_mac
+                previous = hass.data[DOMAIN].get(BLE_CANDIDATES, {}).get(key)
+                remember_candidate(hass, expected_mac, sensor_mac, decoded.get(SENSOR_SIGNAL_STRENGTH))
+                if previous is None or time.time() - previous["last_seen"] > 900:
+                    config_entry.async_create_background_task(
+                        hass,
+                        hass.config_entries.flow.async_init(
+                            DOMAIN, context={"source": SOURCE_INTEGRATION_DISCOVERY},
+                            data={CONF_MAC: sensor_mac, CONF_GATEWAY_MAC: expected_mac},
+                        ),
+                        "Discover Qingping BLE sensor",
+                    )
+                relay = sensor_mac, decoded
+            elif kind in {"12", "17"}:
+                if incoming_mac and incoming_mac != expected_mac:
+                    relay = incoming_mac, None
+                elif "mac" not in payload or incoming_mac == expected_mac:
+                    own_report = _handle_gateway_report(payload, kind)
+            elif kind == "28" and isinstance(payload.get("setting"), dict) and payload["setting"]:
+                await _update_settings_from_device(hass, config_entry, payload["setting"], model)
 
-            received_mac = payload.get("mac", "").replace(":", "").upper()
-            expected_mac = mac.replace(":", "").upper()
-
-            # NEW: gateway-relayed BLE packet
-            if model in ADV_MODELS:
-                if not received_mac or received_mac != expected_mac:
-                    return
-
-                sensor_data = payload.get("sensorData")
-                if message_type in {"12", "17"} and isinstance(sensor_data, list) and sensor_data:
-                    current_timestamp = int(time.time())
-                    if status_sensor.hass:
-                        status_sensor.update_timestamp(current_timestamp)
-                    if mac_sensor.hass:
-                        mac_sensor.update_mac(expected_mac)
-                    _update_sensors_from_json_sensor_data(sensor_data)
-                    return
-
-                if message_type != "9":
-                    return
-
-                adv_data = payload.get("adv_data")
-                if not adv_data:
-                    return
-
-                decoded = decode_qingping_adv_data(adv_data)
-                if not decoded.get("ok"):
-                    return
-
-                payload_mac = (decoded.get("payload_mac") or "").upper()
-                if payload_mac and payload_mac != expected_mac:
-                    return
-
-                current_timestamp = int(time.time())
-                if status_sensor.hass:
-                    status_sensor.update_timestamp(current_timestamp)
-
+            await private_handler.async_handle_message(payload, message.topic, own_report=own_report)
+            if relay is not None:
+                _route_to_ble(relay[0], payload, relay[1])
+            if private_handler.last_seen_gateway is not None:
+                status_sensor.update_timestamp(private_handler.last_seen_gateway)
                 if mac_sensor.hass:
                     mac_sensor.update_mac(expected_mac)
+            version = payload.get("sw_version") or payload.get("version")
+            if isinstance(version, str) and firmware_sensor.hass:
+                firmware_sensor.update_version(version)
+            return
 
-                rssi = payload.get("rssi")
-                if rssi is not None:
-                    try:
-                        rssi = int(rssi)
-                    except (TypeError, ValueError):
-                        rssi = None
-
-                if temp_sensor and temp_sensor.hass and decoded.get("temperature") is not None:
-                    temp_sensor.update_from_latest_data(decoded["temperature"])
-
-                if humidity_sensor and humidity_sensor.hass and decoded.get("humidity") is not None:
-                    humidity_sensor.update_from_latest_data(decoded["humidity"])
-
-                if battery_sensor and battery_sensor.hass and decoded.get("battery") is not None:
-                    battery_sensor.update_from_latest_data(decoded["battery"])
-
-                if signal_sensor and signal_sensor.hass and rssi is not None:
-                    signal_sensor.update_from_latest_data(rssi)
-
-                return
-
-            # Check message type first - type 28 (settings) messages don't include MAC
-            message_type = payload.get("type")
-            
-            # For messages with MAC, verify it matches
-            received_mac = payload.get("mac", "").replace(":", "").upper()
-            expected_mac = mac.replace(":", "").upper()
-            
-            # Skip MAC check for messages without MAC (type 28, 13, 10, 17, etc.)
-            # We're subscribed to this device's specific topic, so we know it's for us
-            if received_mac and received_mac != expected_mac:
-                _LOGGER.debug("Received message for a different device. Expected: %s, Got: %s", expected_mac, received_mac)
-                return
-            
-            _LOGGER.debug("Processing MQTT message type %s for device %s", message_type, mac)
-            
-            # Update timestamp first - any message from device means it's online
-            # Always use current system time, not device's timestamp which may be unreliable
-            current_timestamp = int(time.time())
-            if status_sensor.hass:
-                status_sensor.update_timestamp(current_timestamp)
-
-            firmware_version = payload.get("version")
-            if firmware_version is not None:
-                if firmware_sensor.hass:
-                    firmware_sensor.update_version(firmware_version)
-
-            device_type = payload.get("type")
-            if device_type is not None and type_sensor and type_sensor.hass:
-                type_sensor.update_type(device_type)
-
-            mac_address = payload.get("mac")
-            if mac_address is not None:
-                if mac_sensor.hass:
-                    mac_sensor.update_mac(mac_address)
-
-            # Handle type 28 messages (device settings update) - Check BEFORE sensorData
-            if message_type == 28 or message_type == "28":
-                _LOGGER.info("Type 28 settings update received for device %s", mac)
-                settings = payload.get("setting", {})
-                if settings:
-                    hass.async_create_task(_update_settings_from_device(hass, config_entry, settings, model))
-                else:
-                    _LOGGER.warning("Type 28 message has no settings dict")
-                return  # Don't process as sensor data
-
-            sensor_data = payload.get("sensorData")
-            if not isinstance(sensor_data, list) or not sensor_data:
-                _LOGGER.debug("No valid sensorData in payload, possibly a config response or device just powered on")
-                # Device is online, just waiting for sensor data
-                return
-            if message_type not in [13, "13"]:
-                _update_sensors_from_json_sensor_data(sensor_data)
-            else:
-                _LOGGER.debug("Ignoring heartbeat sensorData for %s", mac)
-                return
-
-        except json.JSONDecodeError:
-            _LOGGER.error("Invalid JSON in MQTT message: %s", message.payload)
-        except Exception as e:
-            _LOGGER.error("Error processing MQTT message: %s", str(e))
+        if "mac" in payload and incoming_mac != expected_mac:
+            return
+        status_sensor.update_timestamp(time.time())
+        if (version := payload.get("version")) is not None and firmware_sensor.hass:
+            firmware_sensor.update_version(version)
+        if incoming_mac and mac_sensor.hass:
+            mac_sensor.update_mac(incoming_mac)
+        if kind and type_sensor and type_sensor.hass:
+            type_sensor.update_type(kind)
+        if kind == "28":
+            if isinstance(payload.get("setting"), dict) and payload["setting"]:
+                await _update_settings_from_device(hass, config_entry, payload["setting"], model)
+            return
+        if kind != "13" and isinstance(payload.get("sensorData"), list):
+            _update_sensors_from_json_sensor_data(payload["sensorData"])
 
     def _handle_tlv_message(message):
         """Handle TLV binary format messages."""
@@ -814,36 +780,38 @@ async def async_setup_entry(
         except Exception as e:
             _LOGGER.error("Error processing TLV message: %s", str(e))
 
-    topics = [f"{MQTT_TOPIC_PREFIX}/#"] if model == "CGDK2" else up_topic_variants(mac)
-    for topic in topics:
-        await mqtt.async_subscribe(
-            hass, topic, message_received, 1, encoding=None
-        )
-        _LOGGER.info("Subscribed to MQTT topic: %s", topic)
+    if model in ADV_MODELS:
+        runtime["ble_receiver"] = _accept_ble_report
+        return
 
-    if model not in ADV_MODELS and model != "CGDN1":
-        # Set up timer for periodic publishing
-        async def publish_config_wrapper(*args):
+    configured_topic = entry_settings(config_entry).get(CONF_GATEWAY_UP_TOPIC)
+    topics = [configured_topic] if configured_topic else up_topic_variants(mac)
+    for topic in topics:
+        unsubscribe = await mqtt.async_subscribe(hass, topic, message_received, 1, encoding=None)
+        config_entry.async_on_unload(unsubscribe)
+
+    if private_handler is not None:
+        config_entry.async_create_background_task(hass, private_handler.async_start(), "Start Qingping gateway")
+    else:
+        async def publish_config_wrapper(*_):
+            if private_handler is not None:
+                return
             if await ensure_mqtt_connected(hass):
                 for sensor in sensors:
-                    if isinstance(sensor, QingpingDeviceSensor) and hasattr(sensor, "publish_config"):
+                    if isinstance(sensor, QingpingDeviceSensor):
                         await sensor.publish_config()
                         break
-            else:
-                _LOGGER.error("Failed to connect to MQTT for periodic config publish")
 
-        hass.data[DOMAIN][config_entry.entry_id]["remove_timer"] = async_track_time_interval(
+        config_entry.async_on_unload(async_track_time_interval(
             hass, publish_config_wrapper, timedelta(seconds=int(DEFAULT_DURATION))
-        )
+        ))
 
         async def delayed_publish():
             await asyncio.sleep(2)
-            if await ensure_mqtt_connected(hass):
-                await publish_config_wrapper()
-            else:
-                _LOGGER.error("Failed to connect to MQTT for initial config publish")
+            await publish_config_wrapper()
 
-        asyncio.create_task(delayed_publish())
+        config_entry.async_create_background_task(hass, delayed_publish(), "Publish Qingping device settings")
+
 
 class QingpingDeviceStatusSensor(CoordinatorEntity, SensorEntity):
     """Representation of a Qingping Device status sensor."""
@@ -859,92 +827,119 @@ class QingpingDeviceStatusSensor(CoordinatorEntity, SensorEntity):
         self._attr_device_info = device_info
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
         self._attr_native_value = "offline"
-        self._last_timestamp = 0
-        self._last_status = "online"
+        self._attr_extra_state_attributes = {}
+        self._last_timestamp = None
+        self._last_received = None
+
+    @property
+    def ble_timeout(self):
+        return int(entry_settings(self._config_entry).get(CONF_BLE_TIMEOUT, DEFAULT_BLE_TIMEOUT))
 
     @callback
     def update_timestamp(self, timestamp):
-        """Update the last received timestamp."""
-        old_timestamp = self._last_timestamp
-        self._last_timestamp = int(timestamp)
-        old_status = self._attr_native_value
-        if old_timestamp == 0 or old_status == "offline":
-            _LOGGER.info("Device %s came online (timestamp: %s)", self._mac, timestamp)
+        """Record an accepted message independently of state changes."""
+        if self._last_timestamp == timestamp:
+            return
+        self._last_timestamp = timestamp
+        self._last_received = time.monotonic()
         self._update_status()
-        # Log if status changed unexpectedly
-        if old_status == "online" and self._attr_native_value == "offline":
-            _LOGGER.error("Device %s immediately went offline after timestamp update! old_ts=%s, new_ts=%s, current_time=%s", 
-                         self._mac, old_timestamp, self._last_timestamp, int(time.time()))
 
     @callback
     def _update_status(self):
-        """Update the status based on the last timestamp."""
+        """Update availability using separate gateway and sensor deadlines."""
         if not self.hass:
             return
-        
-        # Get model and report mode to determine timeout
         model = self._config_entry.data.get(CONF_MODEL, "CGS1")
-        
-        # Determine timeout based on device type and mode
-        if model in TLV_MODELS:
-            report_mode = self.coordinator.data.get(CONF_REPORT_MODE, REPORT_MODE_HISTORIC)
-            timeout = OFFLINE_TIMEOUT_REALTIME if report_mode == REPORT_MODE_REALTIME else OFFLINE_TIMEOUT_HISTORIC
-        else:
-            # JSON devices use standard timeout
-            timeout = OFFLINE_TIMEOUT_REALTIME
-        
-        current_time = int(time.time())
-        time_since_last_msg = current_time - self._last_timestamp
-        new_status = "online" if time_since_last_msg <= timeout else "offline"
-        
-        if self._attr_native_value != new_status:
-            old_status = self._attr_native_value
+        runtime = self.hass.data[DOMAIN].get(self._config_entry.entry_id, {})
+        private = runtime.get("private_handler")
+        elapsed = time.monotonic() - self._last_received if self._last_received is not None else float("inf")
+        timeout = OFFLINE_TIMEOUT_REALTIME
+        attributes = {}
+        reason = None
+        if (private is not None or model in ADV_MODELS) and not mqtt.is_connected(self.hass):
+            reason = "mqtt_disconnected"
+        if model in ADV_MODELS:
+            gateways = gateway_entries(self.hass)
+            gateway_mac = resolve_gateway(entry_settings(self._config_entry), gateways)
+            gateway = gateways.get(gateway_mac)
+            gateway_handler = (
+                self.hass.data[DOMAIN].get(gateway.entry_id, {}).get("private_handler") if gateway else None
+            )
+            attributes[CONF_GATEWAY_MAC] = gateway_mac
+            timeout = self.ble_timeout
+            if not gateway_mac and not reason:
+                reason = "gateway_unassigned"
+            elif gateway_handler is None and not reason:
+                reason = "gateway_unavailable"
+            elif gateway_handler is not None and not gateway_handler.online and not reason:
+                reason = "gateway_unavailable"
+        elif private is not None:
+            timeout = private.timeout
+            if private.last_seen_gateway is not None and not private.online and not reason:
+                reason = "gateway_unavailable"
+            attributes.update(
+                requested_mqtt_interval=private.requested_interval,
+                observed_mqtt_interval=private.observed_interval,
+                interval_status=private.report_status,
+                settings_confirmed=private.settings_confirmed,
+                permanent_report_interval=private.last_gateway_settings.get("report_interval"),
+                gateway_sample_interval=private.last_gateway_settings.get("collect_interval"),
+            )
+        elif model in TLV_MODELS:
+            mode = self.coordinator.data.get(CONF_REPORT_MODE, REPORT_MODE_HISTORIC)
+            if mode != REPORT_MODE_REALTIME:
+                timeout = OFFLINE_TIMEOUT_HISTORIC
+
+        if not reason and elapsed > timeout:
+            reason = "packet_timeout" if self._last_received is not None else "waiting_for_packet"
+        attributes.update(availability_reason=reason, timeout_seconds=timeout)
+        if private is not None or model in ADV_MODELS:
+            if self._last_timestamp is not None:
+                attributes["last_packet"] = datetime.fromtimestamp(self._last_timestamp, timezone.utc).isoformat()
+            if (measurement := runtime.get("last_measurement_at")) is not None:
+                attributes["last_measurement"] = datetime.fromtimestamp(measurement, timezone.utc).isoformat()
+        new_status = "offline" if reason else "online"
+        old_status = self._attr_native_value
+        changed = old_status != new_status
+        if changed or self._attr_extra_state_attributes != attributes:
             self._attr_native_value = new_status
+            self._attr_extra_state_attributes = attributes
             self.async_write_ha_state()
-            _LOGGER.info("Device %s status changed from %s to %s (time since last message: %s seconds, timeout: %s)", 
-                        self._mac, old_status, new_status, time_since_last_msg, timeout)
-            
-            # Update other sensors' availability
-            sensors = self.hass.data[DOMAIN][self._config_entry.entry_id].get("sensors", [])
-            for sensor in sensors:
+        if changed:
+            _LOGGER.info("Qingping %s is %s%s", self._mac, new_status, f" ({reason})" if reason else "")
+            for sensor in runtime.get("sensors", []):
                 if isinstance(sensor, QingpingDeviceSensor) and sensor.hass:
                     sensor.async_write_ha_state()
-            
-            # Call publish_config when status changes from offline to online
-            if self._last_status == "offline" and new_status == "online":
-                _LOGGER.info("Device %s recovered from offline, publishing config", self._mac)
-                asyncio.create_task(self._publish_config_on_status_change())
-            
-            self._last_status = new_status
-
-    async def _publish_config_on_status_change(self):
-        """Publish config when status changes from offline to online."""
-        if not self.hass:
-            return
-        model = self._config_entry.data.get(CONF_MODEL, "CGS1")
-        if model in ADV_MODELS or model == "CGDN1":
-            return
-        # Add a small delay to let the device fully come online
-        await asyncio.sleep(2)
-        sensors = self.hass.data[DOMAIN][self._config_entry.entry_id].get("sensors", [])
-        for sensor in sensors:
-            if isinstance(sensor, QingpingDeviceSensor):
-                await sensor.publish_config()
-                break  # We only need to call it once                
+            if new_status == "online" and self._last_received is not None and model not in ADV_MODELS and private is None:
+                async def publish_after_reconnect():
+                    await asyncio.sleep(2)
+                    for sensor in runtime.get("sensors", []):
+                        if isinstance(sensor, QingpingDeviceSensor):
+                            await sensor.publish_config()
+                            break
+                if old_status == "offline" and runtime.get("has_been_online"):
+                    self._config_entry.async_create_background_task(
+                        self.hass, publish_after_reconnect(), "Restore Qingping device reporting"
+                    )
+                runtime["has_been_online"] = True
 
     async def async_added_to_hass(self):
-        """Set up a timer to regularly update the status."""
+        """Check timeouts independently of data arriving from MQTT."""
         await super().async_added_to_hass()
-
-        # Immediately check if we should be online based on recent activity
         self._update_status()
+        if self._config_entry.data.get(CONF_MODEL) in (*ADV_MODELS, "CGDN1"):
+            from . import async_sync_gateway_membership
 
-        async def update_status(*_):
+            self._config_entry.async_create_background_task(
+                self.hass, async_sync_gateway_membership(self.hass), "Update Qingping gateway membership"
+            )
+
+        @callback
+        def update_status(*_):
             self._update_status()
 
-        self.async_on_remove(async_track_time_interval(
-            self.hass, update_status, timedelta(seconds=60)
-        ))
+        self.async_on_remove(async_track_time_interval(self.hass, update_status, timedelta(seconds=15)))
+
 
 class QingpingDeviceFirmwareSensor(CoordinatorEntity, SensorEntity):
     """Representation of a Qingping Device firmware sensor."""
@@ -1272,11 +1267,3 @@ class QingpingDeviceSensor(CoordinatorEntity, SensorEntity):
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added to hass."""
         await super().async_added_to_hass()
-
-    async def async_will_remove_from_hass(self) -> None:
-        """Clean up the timer when entity is removed."""
-        if self.hass and self._config_entry.entry_id in self.hass.data.get(DOMAIN, {}):
-            remove_timer = self.hass.data[DOMAIN][self._config_entry.entry_id].get("remove_timer")
-            if remove_timer:
-                remove_timer()
-        await super().async_will_remove_from_hass()

@@ -4,8 +4,12 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: write
+
 jobs:
   release-zip:
+    if: ${{ !contains(github.event.release.assets.*.name, 'qingping_cgs1.zip') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,13 +17,13 @@ jobs:
       - name: ZIP Component Dir
         run: |
           cd ${{ github.workspace }}/custom_components/qingping_cgs1
-          zip -r qingping_cgs1.zip ./
+          zip -r "$RUNNER_TEMP/qingping_cgs1.zip" ./
 
       - name: Upload zip to release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ${{ github.workspace }}/custom_components/qingping_cgs1/qingping_cgs1.zip
+          file: ${{ runner.temp }}/qingping_cgs1.zip
           asset_name: qingping_cgs1.zip
           tag: ${{ github.ref }}
           overwrite: true

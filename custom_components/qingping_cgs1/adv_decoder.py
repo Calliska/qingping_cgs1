@@ -1,82 +1,61 @@
-# adv_decoder.py
+"""Decode Qingping CGDK2 service data received through a gateway."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
+_QINGPING_UUIDS = (b"\xcd\xfd", b"\xfd\xcd")
+_CGDK2_DEVICE_TYPE = 0x10
 
-def decode_qingping_adv_data(adv_hex: str) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "ok": False,
-        "temperature": None,
-        "humidity": None,
-        "battery": None,
-        "payload_mac": None,
-    }
 
+def _service_data(raw: bytes) -> Iterator[bytes]:
+    """Accept the complete advertisement or the UUID-prefixed service data."""
+    if raw[:2] in _QINGPING_UUIDS:
+        yield raw[2:]
+        return
+    pos = 0
+    while pos < len(raw) and raw[pos]:
+        end = pos + raw[pos] + 1
+        if end > len(raw):
+            return
+        if raw[pos + 1] == 0x16 and raw[pos + 2 : pos + 4] in _QINGPING_UUIDS:
+            yield raw[pos + 4 : end]
+        pos = end
+
+
+def decode_qingping_adv_data(adv_hex: Any) -> dict[str, Any]:
+    """Return only supported measurements from a complete CGDK2 frame."""
+    empty = {"ok": False, "temperature": None, "humidity": None, "battery": None, "payload_mac": None}
+    if not isinstance(adv_hex, str):
+        return empty
     try:
         raw = bytes.fromhex(adv_hex)
     except ValueError:
-        return result
+        return empty
 
-    i = 0
-    while i < len(raw):
-        if i + 1 >= len(raw):
-            break
-
-        ad_len = raw[i]
-        if ad_len == 0:
-            break
-
-        end = i + 1 + ad_len
-        if end > len(raw):
-            break
-
-        ad_type = raw[i + 1]
-        ad_payload = raw[i + 2:end]
-
-        # 0x16 = Service Data, 16-bit UUID
-        if ad_type == 0x16 and len(ad_payload) >= 2:
-            uuid_hex = ad_payload[:2][::-1].hex().upper()
-
-            # Qingping/Cleargrass service UUID
-            if uuid_hex == "FDCD":
-                body = ad_payload[2:]
-
-                # 2 bytes header + 6 bytes MAC + TLV
-                if len(body) < 8:
-                    return result
-
-                mac_reversed = body[2:8]
-                tlv = body[8:]
-
-                result["payload_mac"] = mac_reversed[::-1].hex().upper()
-
-                j = 0
-                while j + 2 <= len(tlv):
-                    t = tlv[j]
-                    l = tlv[j + 1]
-                    v_start = j + 2
-                    v_end = v_start + l
-                    if v_end > len(tlv):
-                        break
-
-                    v = tlv[v_start:v_end]
-
-                    # 0x01 len=4 -> temp + humidity
-                    if t == 0x01 and l == 4:
-                        result["temperature"] = int.from_bytes(v[0:2], "little") / 10.0
-                        result["humidity"] = int.from_bytes(v[2:4], "little") / 10.0
-
-                    # 0x02 len=1 -> battery
-                    elif t == 0x02 and l == 1:
-                        result["battery"] = v[0]
-
-                    j = v_end
-
-                result["ok"] = True
-                return result
-
-        i = end
-
-    return result
+    for data in _service_data(raw):
+        if len(data) < 8 or data[1] != _CGDK2_DEVICE_TYPE:
+            continue
+        result = {**empty, "payload_mac": data[2:8][::-1].hex().upper()}
+        pos = 8
+        while pos + 2 <= len(data):
+            kind, size = data[pos : pos + 2]
+            end = pos + 2 + size
+            if end > len(data):
+                break
+            value = data[pos + 2 : end]
+            if kind == 0x01 and size == 4:
+                temperature = int.from_bytes(value[:2], "little", signed=True) / 10
+                humidity = int.from_bytes(value[2:], "little") / 10
+                if -100 <= temperature <= 100:
+                    result["temperature"] = temperature
+                if 0 <= humidity <= 100:
+                    result["humidity"] = humidity
+            elif kind == 0x02 and size == 1 and value[0] <= 100:
+                result["battery"] = value[0]
+            pos = end
+        if pos == len(data) and any(result[key] is not None for key in ("temperature", "humidity", "battery")):
+            result["ok"] = True
+            return result
+    return empty

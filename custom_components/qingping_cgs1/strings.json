@@ -1,0 +1,116 @@
+{
+  "config": {
+    "flow_title": "Qingping: {name}",
+    "step": {
+      "user": {
+        "title": "Add a Qingping device",
+        "menu_options": {
+          "gateway": "Add a CGDN1 gateway",
+          "ble": "Add a CGDK2 BLE sensor",
+          "other": "Add another Qingping MQTT device"
+        }
+      },
+      "gateway": {
+        "title": "Add a CGDN1 gateway",
+        "description": "Select a gateway detected on MQTT or enter its MAC. Set exact topics if you use non-default private MQTT topics.",
+        "data": {
+          "discovered_mac": "Detected gateway",
+          "mac": "Gateway MAC",
+          "name": "Name",
+          "gateway_up_topic": "MQTT up topic",
+          "gateway_down_topic": "MQTT down topic"
+        }
+      },
+      "ble": {
+        "title": "Add a CGDK2 BLE sensor",
+        "description": "Select a sensor heard by a gateway or enter its MAC and select a gateway. Name and MAC can be entered manually even if other sensors were found.",
+        "data": {
+          "discovered_mac": "Detected or imported sensor",
+          "mac": "Sensor MAC",
+          "gateway_mac": "Gateway",
+          "name": "Name",
+          "ble_timeout": "Sensor timeout (seconds)"
+        }
+      },
+      "confirm_ble": {
+        "title": "Add the discovered CGDK2",
+        "description": "A Qingping gateway received a valid advertisement from {mac}.",
+        "data": {
+          "name": "Name",
+          "gateway_mac": "Gateway"
+        }
+      },
+      "other": {
+        "title": "Add a Qingping MQTT device",
+        "data": {
+          "discovered_mac": "Detected device",
+          "mac": "Device MAC",
+          "name": "Name",
+          "model": "Model"
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Enter a valid 12-digit hexadecimal MAC address.",
+      "invalid_topics": "Set separate literal MQTT topics, including the down topic if the up topic does not end in /up.",
+      "topics_in_use": "One of the selected MQTT topics is already assigned to another gateway.",
+      "no_gateway": "Select the gateway for this sensor."
+    },
+    "abort": {
+      "already_configured": "This Qingping device is already configured or ignored.",
+      "no_gateway": "Add and enable a CGDN1 gateway before adding a BLE sensor."
+    }
+  },
+  "options": {
+    "step": {
+      "gateway_options": {
+        "title": "Configure Qingping device",
+        "description": "These MQTT reporting parameters apply to CGDN1. Automatic BLE addition creates devices for verified advertisements received by this gateway. Leave it off to approve discovered sensors individually.",
+        "data": {
+          "model": "Model",
+          "gateway_up_topic": "MQTT up topic",
+          "gateway_down_topic": "MQTT down topic",
+          "auto_add_ble": "Automatically add discovered CGDK2 sensors",
+          "temporary_report": "Keep temporary MQTT reporting enabled",
+          "temporary_report_interval": "Temporary MQTT report interval (seconds)",
+          "temporary_report_duration": "Temporary report duration (seconds)",
+          "temporary_report_refresh": "Temporary report renewal interval (seconds)",
+          "configure_gateway_on_start": "Apply persistent settings on startup",
+          "configure_gateway_on_reconnect": "Apply persistent settings after gateway reconnect",
+          "report_interval": "Persistent gateway report interval (seconds)",
+          "collect_interval": "Gateway sample interval (seconds)",
+          "co2_sampling_interval": "CO₂ sample interval (seconds)",
+          "pm_sampling_interval": "PM sample interval (seconds)",
+          "temperature_unit": "Temperature unit"
+        }
+      },
+      "device_options": {
+        "title": "Configure Qingping device",
+        "data": {"model": "Model"}
+      },
+      "sensor_options": {
+        "title": "Configure CGDK2",
+        "description": "Select the gateway that should report this sensor, or leave it unassigned.",
+        "data": {
+          "gateway_mac": "Assigned gateway",
+          "ble_timeout": "Sensor timeout (seconds)"
+        }
+      }
+    },
+    "error": {
+      "invalid_topics": "Set separate literal MQTT topics, including the down topic if the up topic does not end in /up.",
+      "topics_in_use": "One of the selected MQTT topics is already assigned to another gateway.",
+      "duration_too_short": "The duration must be longer than the report interval."
+    }
+  },
+  "entity": {
+    "button": {
+      "sync_ble_devices": {
+        "name": "Synchronize BLE devices"
+      },
+      "read_gateway_settings": {
+        "name": "Read gateway settings"
+      }
+    }
+  }
+}

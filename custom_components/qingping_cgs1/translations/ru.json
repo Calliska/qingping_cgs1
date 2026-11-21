@@ -1,0 +1,116 @@
+{
+  "config": {
+    "flow_title": "Qingping: {name}",
+    "step": {
+      "user": {
+        "title": "Добавить устройство Qingping",
+        "menu_options": {
+          "gateway": "Добавить шлюз CGDN1",
+          "ble": "Добавить BLE-датчик CGDK2",
+          "other": "Добавить другое MQTT-устройство Qingping"
+        }
+      },
+      "gateway": {
+        "title": "Добавить шлюз CGDN1",
+        "description": "Выберите обнаруженный шлюз или введите MAC. Для нестандартной конфигурации укажите точные MQTT-топики.",
+        "data": {
+          "discovered_mac": "Обнаруженный шлюз",
+          "mac": "MAC шлюза",
+          "name": "Имя",
+          "gateway_up_topic": "Топик MQTT для отчётов",
+          "gateway_down_topic": "Топик MQTT для команд"
+        }
+      },
+      "ble": {
+        "title": "Добавить BLE-датчик CGDK2",
+        "description": "Выберите датчик, принятый шлюзом, или введите MAC вручную и выберите шлюз.",
+        "data": {
+          "discovered_mac": "Обнаруженный или перенесённый датчик",
+          "mac": "MAC датчика",
+          "gateway_mac": "Шлюз",
+          "name": "Имя",
+          "ble_timeout": "Тайм-аут датчика (секунды)"
+        }
+      },
+      "confirm_ble": {
+        "title": "Добавить обнаруженный CGDK2",
+        "description": "Шлюз Qingping принял корректный BLE-пакет от {mac}.",
+        "data": {
+          "name": "Имя",
+          "gateway_mac": "Шлюз"
+        }
+      },
+      "other": {
+        "title": "Добавить MQTT-устройство Qingping",
+        "data": {
+          "discovered_mac": "Обнаруженное устройство",
+          "mac": "MAC устройства",
+          "name": "Имя",
+          "model": "Модель"
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Введите корректный MAC из 12 шестнадцатеричных символов.",
+      "invalid_topics": "Укажите разные точные MQTT-топики. Если топик отчётов не заканчивается на /up, укажите топик команд.",
+      "topics_in_use": "Один из MQTT-топиков уже назначен другому шлюзу.",
+      "no_gateway": "Выберите шлюз для этого датчика."
+    },
+    "abort": {
+      "already_configured": "Это устройство Qingping настроено или скрыто.",
+      "no_gateway": "Добавьте и включите шлюз CGDN1 перед настройкой BLE-датчика."
+    }
+  },
+  "options": {
+    "step": {
+      "gateway_options": {
+        "title": "Настроить Qingping",
+        "description": "Параметры MQTT применяются к CGDN1. При автоматическом добавлении HA создаёт устройства по корректным BLE-пакетам этого шлюза. Оставьте настройку выключенной, чтобы подтверждать добавление вручную.",
+        "data": {
+          "model": "Модель",
+          "gateway_up_topic": "Топик MQTT для отчётов",
+          "gateway_down_topic": "Топик MQTT для команд",
+          "auto_add_ble": "Автоматически добавлять обнаруженные CGDK2",
+          "temporary_report": "Поддерживать временный режим MQTT",
+          "temporary_report_interval": "Временный интервал MQTT (секунды)",
+          "temporary_report_duration": "Длительность временного режима (секунды)",
+          "temporary_report_refresh": "Интервал продления временного режима (секунды)",
+          "configure_gateway_on_start": "Применять постоянные настройки при запуске",
+          "configure_gateway_on_reconnect": "Применять постоянные настройки после переподключения",
+          "report_interval": "Постоянный интервал отчётов шлюза (секунды)",
+          "collect_interval": "Интервал измерений шлюза (секунды)",
+          "co2_sampling_interval": "Интервал измерений CO₂ (секунды)",
+          "pm_sampling_interval": "Интервал измерений PM (секунды)",
+          "temperature_unit": "Единица температуры"
+        }
+      },
+      "device_options": {
+        "title": "Настроить Qingping",
+        "data": {"model": "Модель"}
+      },
+      "sensor_options": {
+        "title": "Настроить CGDK2",
+        "description": "Укажите, какой шлюз должен передавать показания датчика, или снимите привязку.",
+        "data": {
+          "gateway_mac": "Назначенный шлюз",
+          "ble_timeout": "Тайм-аут датчика (секунды)"
+        }
+      }
+    },
+    "error": {
+      "invalid_topics": "Укажите разные точные MQTT-топики. Если топик отчётов не заканчивается на /up, укажите топик команд.",
+      "topics_in_use": "Один из MQTT-топиков уже назначен другому шлюзу.",
+      "duration_too_short": "Длительность режима должна превышать интервал отчётов."
+    }
+  },
+  "entity": {
+    "button": {
+      "sync_ble_devices": {
+        "name": "Синхронизировать BLE-датчики"
+      },
+      "read_gateway_settings": {
+        "name": "Прочитать настройки шлюза"
+      }
+    }
+  }
+}

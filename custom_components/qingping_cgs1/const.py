@@ -50,6 +50,12 @@ MQTT_TOPIC_PREFIX = "qingping"
 
 # Qingping private MQTT gateway settings
 CONF_BLE_DEVICES = "ble_devices"
+CONF_GATEWAY_MAC = "gateway_mac"
+CONF_GATEWAY_UP_TOPIC = "gateway_up_topic"
+CONF_GATEWAY_DOWN_TOPIC = "gateway_down_topic"
+CONF_OBSERVED_UP_TOPIC = "observed_up_topic"
+CONF_AUTO_ADD_BLE = "auto_add_ble"
+CONF_BLE_TIMEOUT = "ble_timeout"
 CONF_TEMPORARY_REPORT = "temporary_report"
 CONF_TEMPORARY_REPORT_INTERVAL = "temporary_report_interval"
 CONF_TEMPORARY_REPORT_DURATION = "temporary_report_duration"
@@ -68,6 +74,8 @@ DEFAULT_TEMPORARY_REPORT_REFRESH = 43200
 DIAGNOSTIC_REPORT_INTERVAL = 10
 DIAGNOSTIC_REPORT_DURATION = 600
 SENSOR_DATA_STALE_SECONDS = 600
+DEFAULT_BLE_TIMEOUT = 600
+BLE_CANDIDATE_TTL = 86400
 
 # Configuration message
 ATTR_TYPE = "type"

@@ -20,7 +20,6 @@ enable_temporary_report:
     interval:
       name: Interval
       description: Report interval in seconds.
-      default: 60
       selector:
         number:
           min: 1
@@ -29,7 +28,6 @@ enable_temporary_report:
     duration:
       name: Duration
       description: Temporary report duration in seconds.
-      default: 86400
       selector:
         number:
           min: 1
@@ -49,6 +47,16 @@ enable_diagnostic_report:
 configure_gateway_settings:
   name: Configure gateway settings
   description: Send CGDN1 type 17 persistent gateway settings from integration options.
+  fields:
+    gateway_mac:
+      name: Gateway MAC
+      description: Optional CGDN1 MAC. If omitted, all active CGDN1 gateways are targeted.
+      selector:
+        text:
+
+read_gateway_settings:
+  name: Read gateway settings
+  description: Request the CGDN1 settings over MQTT. Results appear in diagnostics.
   fields:
     gateway_mac:
       name: Gateway MAC

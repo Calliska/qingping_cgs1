@@ -35,7 +35,7 @@ RESULT_CODES = {
 def normalize_mac(mac: str) -> str:
     """Normalize a MAC address to uppercase 12-char Qingping format."""
     normalized = str(mac or "").replace(":", "").replace("-", "").upper()
-    if not MAC_RE.match(normalized):
+    if not MAC_RE.fullmatch(normalized):
         raise ValueError(f"Invalid MAC address: {mac!r}")
     return normalized
 
@@ -132,22 +132,30 @@ def build_type_17_gateway_settings_payload(
     co2_sampling_interval: int,
     pm_sampling_interval: int,
     temperature_unit: str,
-    timezone: int,
+    timezone: int | None = None,
+    timestamp: int | None = None,
 ) -> dict[str, Any]:
     """Build persistent CGDN1 gateway settings command."""
     return {
         "id": int(message_id),
         "need_ack": 1,
         "type": "17",
+        "desc": "change settings",
+        "timestamp": int(time.time()) if timestamp is None else int(timestamp),
         "setting": {
             "report_interval": int(report_interval),
             "collect_interval": int(collect_interval),
             "co2_sampling_interval": int(co2_sampling_interval),
             "pm_sampling_interval": int(pm_sampling_interval),
             "temperature_unit": str(temperature_unit),
-            "timezone": int(timezone),
+            **({"timezone": int(timezone)} if timezone is not None else {}),
         },
     }
+
+
+def mqtt_topic_is_valid(topic: str) -> bool:
+    """Accept literal MQTT topics, including a custom topic prefix."""
+    return bool(topic and not any(char in topic for char in ("+", "#", "\0")))
 
 
 def result_description(result: Any) -> str:
